@@ -19,6 +19,7 @@ Dokumen ini menjelaskan fitur dan alur penggunaan situs **KREASI (Sistem Kolabor
 11. [Ringkasan Aturan dan Validasi Penting](#11-ringkasan-aturan-dan-validasi-penting)
 12. [Menjalankan Sistem untuk Pertama Kali](#12-menjalankan-sistem-untuk-pertama-kali)
 13. [Catatan Teknis dan Batasan Implementasi](#13-catatan-teknis-dan-batasan-implementasi)
+14. [Peta Fitur → Kode (untuk presentasi)](#14-peta-fitur--kode-untuk-presentasi)
 
 ---
 
@@ -632,12 +633,13 @@ Panduan lengkap ada di `README.md`. Ringkasan lokal untuk Windows:
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+$env:DJANGO_DEBUG = "1"
 python manage.py migrate
 python manage.py create_kreasi_admin --username admin --name "Administrator Program Studi"
 python manage.py runserver
 ```
 
-Perintah `create_kreasi_admin` meminta kata sandi melalui prompt terminal. Setelah server berjalan, kunjungi `http://127.0.0.1:8000/`, pilih peran **Admin**, lalu masuk menggunakan akun yang dibuat.
+`$env:DJANGO_DEBUG = "1"` wajib untuk uji lokal lewat HTTP biasa (tanpa itu cookie login ditandai *secure* dan login gagal); ketik ulang bila membuka terminal baru. Perintah `create_kreasi_admin` meminta kata sandi melalui prompt terminal. Setelah server berjalan, kunjungi `http://127.0.0.1:8000/`, pilih peran **Admin**, lalu masuk menggunakan akun yang dibuat.
 
 ### Persiapan data awal yang disarankan
 
@@ -676,7 +678,9 @@ Tabel berikut untuk operator/pengembang yang ingin mengetahui jalur komunikasi f
 | `GET` | `/api/session/` | Memeriksa sesi login yang masih aktif. |
 | `POST` | `/api/auth/login/` | Memverifikasi kredensial dan memulai sesi. |
 | `POST` | `/api/auth/logout/` | Mengakhiri sesi login. |
-| `GET` | `/api/state/` | Mengambil data aplikasi sesuai hak akses. |
+| `GET` | `/api/state/` | Mengambil data aplikasi sesuai hak akses beserta nomor versi. |
+| `GET` | `/api/state/version/` | Memeriksa apakah ada data baru dari pengguna lain (dipanggil otomatis tiap 10 detik). |
+| `GET` | `/healthz/` | Pemeriksaan kesehatan untuk hosting. |
 | `POST` | `/api/state/` | Memvalidasi dan menyimpan state aplikasi. |
 | `POST` | `/api/documents/upload/` | Mengunggah berkas dan metadata. |
 | `GET` | `/api/documents/<uuid>/` | Membaca/pratinjau dokumen jika diizinkan. |
@@ -694,3 +698,72 @@ Tabel berikut untuk operator/pengembang yang ingin mengetahui jalur komunikasi f
 - Layanan akun per peran: `portal/services.py`
 - Pemetaan URL: `kreasi_project/urls.py`
 - Pembuatan administrator awal: `portal/management/commands/create_kreasi_admin.py`
+
+---
+
+## 14. Peta Fitur → Kode (untuk presentasi)
+
+Bagian ini menjawab pertanyaan "fitur ini dikerjakan oleh fungsi/class yang mana?". Alurnya selalu sama:
+
+```text
+Pengguna menekan tombol  →  fungsi JavaScript (index.html)  →  endpoint /api/...
+   →  fungsi di portal/views.py  →  class repository / layanan akun  →  database
+```
+
+**Aturan penting:** JavaScript hanya mengatur tampilan. Hak akses yang sebenarnya diperiksa server (`repository.py`, `views.py`). Jadi menu yang disembunyikan di browser bukan satu-satunya pengaman.
+
+### 14.1 Fitur Mahasiswa
+
+| Fitur | Fungsi frontend | Aturan di server |
+|---|---|---|
+| Dashboard | `studentDashboard` | `get_state_for` hanya memberi data milik mahasiswa itu. |
+| Ubah profil & keahlian | `saveProfile`, `addSkill` | `__merge_profile_map`: hanya profil sendiri yang berubah. |
+| Tambah portofolio + berkas | `savePortfolio`, `storeUploadedDocument` | `__merge_owned_rows`; `document_upload` memastikan berkas atas NIM sendiri. |
+| Ajukan prestasi | `submitAchievement` | `__student_achievement_changes`: status selalu "Menunggu Validasi". |
+| Cari & daftar proyek | `openApplyProjectModal`, `submitProjectApplication` | `__visible_projects`, `__student_project_changes`. |
+| Usulkan proyek | `openCreateProjectModal`, `saveNewProject` | `__student_project_changes`: status awal "Diajukan". |
+| Kirim dokumentasi tahapan | `submitMilestone` | `_student_is_project_member`; `__keep_student_milestone_status` mencegah menyetujui sendiri. |
+| Usul anggota baru | `submitProposeMember` | `__student_project_changes`. |
+| Pratinjau SKPI | `studentSkpi` | Data SKPI hanya milik mahasiswa itu. |
+
+### 14.2 Fitur Dosen
+
+| Fitur | Fungsi frontend | Aturan di server |
+|---|---|---|
+| Talent Pool & detail talenta | `lecturerTalentPool`, `openTalentDetail` | Profil mahasiswa tanpa nomor telepon. |
+| Undang mahasiswa | `openInviteTalentModal` | `__merge_invitations`: hanya undangan milik dosen itu. |
+| Tinjau usulan proyek | `openReviewProposalModal`, `submitReviewProposal` | `__lecturer_project_changes`. |
+| Kelola kelompok & anggota | `openAddGroupModal`, `saveNewGroup`, `openManageMembersModal` | `__lecturer_project_changes`: hanya pemilik/pembimbing proyek. |
+| Verifikasi dokumentasi | `openVerifyMilestoneModal`, `submitMilestoneVerification` | Hanya dosen yang dapat menyetujui tahapan. |
+| Nilai & catatan | `saveGrade`, `saveIndividualGrade`, `saveLecturerNote` | `__lecturer_project_changes`. |
+
+### 14.3 Fitur Administrator
+
+| Fitur | Fungsi frontend | Backend |
+|---|---|---|
+| Tambah / ubah / reset sandi / nonaktifkan akun | `saveNewUser`, `saveEditUser`, `saveNewPassword`, `confirmDeleteUser` | `AccountServiceFactory.sync_records` → `sync_record` → `build_profile` (**polimorfisme**). Sandi disimpan sebagai hash. |
+| Validasi prestasi | `submitAchievementValidation` | Hanya Admin yang boleh mengubah `status` prestasi. |
+| Pengumuman | `saveNewAnnouncement`, `saveEditAnnouncement` | Hanya Admin yang boleh mengubah. |
+| Data master (kategori, mata kuliah, poin MEXS) | `saveNewCategory`, `saveNewCourse`, `saveThreshold` | Hanya Admin yang boleh mengubah. |
+| Finalisasi SKPI | `saveFinalizeSkpi` | Hanya Admin yang boleh mengubah. |
+
+### 14.4 Fitur lintas peran
+
+| Fitur | Fungsi frontend | Backend |
+|---|---|---|
+| Login / logout | `handleLoginSubmit`, `doLogout` | `login_view`, `logout_view`. Pesan gagal sengaja seragam. |
+| Notifikasi | `openNotifications` | `__merge_notifications`: hanya status "dibaca" milik sendiri yang berubah. |
+| Pratinjau berkas | `openStoredDocument` | `document_detail` + `can_access_document`. |
+| Hapus berkas | `removeStoredDocument` | `document_delete` + `can_delete_document` (izin hapus terpisah dari izin lihat). |
+| Data selalu terbaru antar perangkat | `kreasiSyncFromServer` | `state_version` + `get_version`. Penyegaran ditunda saat dialog terbuka atau sedang mengetik. |
+
+### 14.5 Di mana 4 pilar OOP terlihat oleh pengguna?
+
+| Pilar | Contoh yang bisa didemokan di aplikasi |
+|---|---|
+| Enkapsulasi | Ubah status prestasi lewat DevTools → server memulihkannya (`KreasiStateRepository`). |
+| Abstraksi | Admin menambah mahasiswa **dan** dosen dengan alur yang sama → `BaseAccountService` menetapkan kontrak yang sama untuk keduanya. |
+| Pewarisan | Akun mahasiswa/dosen/admin tersimpan dengan logika `sync_record` yang sama (diwarisi dari satu induk). |
+| Polimorfisme | Setelah login, mahasiswa mendapat NIM/angkatan/kelas, dosen mendapat NIP/mata kuliah diampu → `serialize_login_profile` berbeda per peran. |
+
+Penjelasan teknis lengkap, diagram, skenario demo, dan tanya-jawab ada di `README.md` bagian 4.

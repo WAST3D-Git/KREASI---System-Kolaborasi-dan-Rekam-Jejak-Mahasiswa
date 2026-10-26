@@ -1,13 +1,20 @@
-"""Repositori data portal KREASI.
+"""Repositori data KREASI (lapisan ATURAN DATA & HAK AKSES) — inti penerapan ENKAPSULASI.
 
-Frontend lama mengirim satu snapshot state JavaScript. Untuk mempertahankan renderer,
-state domain UI tetap disimpan sebagai agregat JSON pada `AppState`, sedangkan kredensial
-akun dan metadata berkas disimpan melalui model relasional Django.
+Gambaran besar
+--------------
+Browser memegang satu objek JavaScript besar (`db`) berisi semua data fitur. Setiap ada
+perubahan, browser mengirim "salinan" objek itu ke server (POST /api/state/). Masalahnya:
+browser bisa dimanipulasi (mis. lewat DevTools), sehingga SERVER tidak boleh percaya begitu saja.
 
-DESAIN ENKAPSULASI: view memakai antarmuka publik `get_state()`, `get_state_for()`, dan
-`save_state()`. Detail pemilihan record, validasi struktur, pemfilteran akses, dan penggabungan
-perubahan disimpan di metode `__...`. Nama ganda memicu name-mangling Python, tetapi bukan
-mekanisme keamanan; kontrol akses sebenarnya dilakukan oleh logika validasi metode ini.
+File ini adalah "penjaga gerbang" server. Ia melakukan dua hal:
+  1. MEMBACA : memberi tiap peran hanya data yang berhak ia lihat  (get_state_for)
+  2. MENYIMPAN: memeriksa & membatasi apa yang boleh diubah tiap peran (save_state)
+
+Contoh nyata: mahasiswa mengubah status prestasinya menjadi "Disetujui" lewat DevTools.
+save_state() akan MENGEMBALIKAN status itu ke nilai lama di server (__student_achievement_changes).
+
+Fitur yang bergantung pada file ini: seluruh data aplikasi (proyek, prestasi, portofolio,
+undangan, notifikasi, pengumuman, data master, SKPI) dan sinkronisasi antar pengguna.
 """
 from copy import deepcopy
 import json
@@ -30,10 +37,11 @@ DEFAULT_COURSES = [
 
 
 def empty_portal_state():
-    """Buat bentuk state awal dengan struktur yang diharapkan frontend.
+    """Bentuk data awal yang kosong (tanpa akun/proyek/prestasi contoh).
 
-    Ini fungsi pembentuk data, bukan class/model OOP. Daftar domain dimulai kosong agar
-    tidak ada akun/proyek/prestasi contoh; nilai master dipertahankan untuk konfigurasi awal.
+    FITUR: dipakai saat sistem baru pertama kali dijalankan (mis. oleh perintah
+    create_kreasi_admin) dan sebagai nilai cadangan bila record state belum ada.
+    Ini FUNGSI biasa (bukan class); hanya pembentuk struktur kerangka data.
     """
     return {
         "users": [], "announcements": [], "talentPool": [], "projects": [],
@@ -49,22 +57,50 @@ def empty_portal_state():
 
 
 class KreasiStateRepository:
-    """Mengelola baca, filter, validasi, dan simpan state KREASI.
+    """Pengelola baca/filter/validasi/simpan seluruh data fitur KREASI.
 
-    `STATE_KEY` mengidentifikasi record agregat tunggal, sedangkan `MAX_STATE_BYTES`
-    membatasi besar payload. Kelas ini menjadi batas data backend agar view tidak mengubah
-    `AppState` secara langsung dan agar pembatasan peran diterapkan sebelum penyimpanan.
+    OOP: ENKAPSULASI (poin utama untuk presentasi)
+      * Satu class memegang SEMUA aturan akses data. View (views.py) hanya memanggil
+        3 method publik: get_state(), get_state_for(), save_state() (+ get_version()).
+      * Detail rumit disembunyikan di method berawalan DUA garis bawah (`__nama`). Python
+        mengubah nama method seperti ini secara internal (name-mangling) sehingga tidak
+        nyaman dipanggil dari luar class. CATATAN JUJUR: ini penanda "internal", bukan
+        kunci keamanan mutlak; keamanan sebenarnya berasal dari pemeriksaan peran di
+        dalam method-method ini.
+      * Atribut class STATE_KEY dan MAX_STATE_BYTES adalah aturan yang dibungkus di sini.
+
+    Manfaat: bila aturan akses berubah, cukup mengubah satu tempat, bukan menyisir banyak view.
     """
     STATE_KEY = "main"
     MAX_STATE_BYTES = 8 * 1024 * 1024
 
-    def __state_record(self):
-        """Metode privat (`__...`) mengenkapsulasi pemilihan record singleton."""
-        record = AppState.objects.filter(key=self.STATE_KEY).first()
-        return record
+    def __state_record(self, lock=False):
+        """[Internal] Ambil record AppState tunggal ("main") dari database.
+
+        `lock=True` dipakai saat menyimpan: pada database yang mendukung (mis. PostgreSQL)
+        baris dikunci agar dua pengguna tidak menimpa satu sama lain. Pada SQLite, penguncian
+        dilakukan oleh pengaturan transaction_mode=IMMEDIATE di settings.py.
+        """
+        queryset = AppState.objects.filter(key=self.STATE_KEY)
+        if lock:
+            queryset = queryset.select_for_update()
+        return queryset.first()
+
+    def get_version(self):
+        """Nomor versi data saat ini.
+
+        FITUR: Sinkronisasi antar pengguna/perangkat. Browser memanggil endpoint ringan
+        /api/state/version/ tiap 10 detik; bila nomor berbeda dari yang ia pegang, ia memuat ulang data.
+        """
+        return AppState.objects.filter(key=self.STATE_KEY).values_list("version", flat=True).first() or 0
 
     def __validate_payload(self, payload):
-        """Validasi internal sebelum JSON disimpan ke basis data."""
+        """[Internal] Pemeriksaan bentuk data dari browser SEBELUM disimpan.
+
+        Menolak payload yang kehilangan bagian utama atau salah tipe (mis. `projects` bukan daftar),
+        tidak bisa diubah ke JSON, atau lebih dari MAX_STATE_BYTES (8 MB). Tujuannya mencegah data
+        rusak/terpotong menimpa data sah (contoh: tab lama mengirim data tidak lengkap).
+        """
         if not isinstance(payload, dict):
             raise ValueError("Format data sistem tidak valid.")
         # Frontend mengirim snapshot lengkap. Menolak array/objek utama yang hilang atau
@@ -85,16 +121,26 @@ class KreasiStateRepository:
             raise ValueError("Data sistem terlalu besar untuk disimpan sekaligus.")
 
     def get_state(self):
-        """Antarmuka baca internal-server untuk memperoleh salinan snapshot penuh."""
+        """Salinan LENGKAP data (tanpa filter peran).
+
+        HANYA untuk pemakaian internal server (mis. views.py memeriksa keanggotaan proyek saat
+        unggah dokumen). Tidak pernah dikirim mentah ke browser; browser selalu lewat get_state_for().
+        """
         record = self.__state_record()
         return deepcopy(record.data) if record else empty_portal_state()
 
     def get_state_for(self, actor):
-        """Kembalikan subset state yang boleh dilihat pengguna yang sedang login.
+        """Data yang BOLEH dilihat oleh pengguna yang sedang login (dibedakan per peran).
 
-        Admin mendapat state yang sudah dibersihkan dari field password; mahasiswa dan
-        dosen memperoleh kumpulan user, proyek, notifikasi, dan profil sesuai role/identitas.
-        Hasilnya adalah salinan data, sehingga filter tidak mengubah snapshot asli di DB.
+        FITUR: dipanggil oleh views.state_view (GET /api/state/) setiap login, muat ulang halaman,
+        dan penyegaran otomatis. Menentukan isi Dashboard, Proyek, Prestasi, Talent Pool, dst.
+
+        Aturan per peran:
+          * ADMIN    : semua data (kecuali field password).
+          * MAHASISWA: hanya prestasi/portofolio/undangan/SKPI/profil MILIKNYA; daftar akun hanya
+                       data umum; proyek sesuai aturan keterkaitan (lihat __visible_projects).
+          * DOSEN    : proyek yang relevan, talent pool, serta profil mahasiswa tanpa nomor telepon.
+        Hasilnya adalah SALINAN (deepcopy) sehingga penyaringan tidak mengubah data asli di database.
         """
         state = self.get_state()
         if actor.role == "admin":
@@ -156,20 +202,20 @@ class KreasiStateRepository:
         return state
 
     def __remove_password_fields(self, state):
-        """Helper privat yang membuang password legacy dari data profil browser.
-
-        Kredensial autentikasi tetap disimpan/hash oleh `PortalUser`; field password pada
-        snapshot UI lama tidak boleh dikirim kembali dalam respons JSON.
+        """[Internal] Buang field `password` dari daftar akun sebelum dikirim ke browser.
+        Sandi sebenarnya hanya ada sebagai hash di tabel PortalUser; ini pengaman lapis kedua.
         """
         for row in state.get("users", []) if isinstance(state.get("users"), list) else []:
             if isinstance(row, dict):
                 row.pop("password", None)
 
     def __visible_projects(self, state, actor, profile):
-        """Helper privat untuk menerapkan aturan visibilitas proyek menurut role.
+        """[Internal] Tentukan proyek mana yang terlihat oleh seorang pengguna.
 
-        Proyek umum tersedia sesuai kategori master; kategori Proyek Mata Kuliah dan
-        Informatika untuk Masyarakat memiliki aturan keterkaitan dengan akun/proyek/kelas.
+        FITUR: Bursa Proyek (mahasiswa), Manajemen Proyek (dosen).
+          * Kategori umum (kompetisi, magang, dsb.)   -> terlihat oleh mahasiswa & dosen.
+          * "Proyek Mata Kuliah" & "Informatika untuk Masyarakat" -> hanya terlihat bila pengguna
+            terkait (pembuat, anggota, pendaftar, pembimbing) atau sesuai angkatan/kelas/mata kuliah.
         """
         role = actor.role
         identity = str(actor.identifier or "")
@@ -217,20 +263,39 @@ class KreasiStateRepository:
         return visible
 
     @transaction.atomic
-    def save_state(self, payload: dict, actor):
-        """Validasi, terapkan batas role, lalu simpan snapshot dalam satu transaksi.
+    def save_state(self, payload: dict, actor, base_version=None):
+        """Validasi, batasi sesuai peran, lalu SIMPAN data ke database dalam satu transaksi.
 
-        Proses utamanya: validasi bentuk data -> salin data -> terapkan kebijakan role ->
-        bila Admin mengubah daftar akun, sinkronkan tabel PortalUser -> hapus password dari
-        snapshot -> simpan/increment versi AppState. Atomic mencegah simpan setengah jalan.
+        FITUR: dipanggil oleh views.state_view (POST /api/state/) setiap kali pengguna melakukan
+        aksi yang menyimpan data (ajukan prestasi, daftar proyek, validasi, ubah akun, dll.).
+
+        Urutan langkah:
+          1. __validate_payload   : cek bentuk data.
+          2. kunci record         : agar penyimpan bersamaan antre, tidak saling menimpa.
+          3. __apply_role_boundaries : kembalikan bagian yang tidak boleh diubah peran ini.
+          4. (Admin saja) sinkronkan tabel PortalUser lewat AccountServiceFactory.sync_records.
+          5. buang field password dari data JSON.
+          6. simpan; `version` naik HANYA bila isi benar-benar berubah.
+
+        `base_version` = versi data yang dipegang browser saat memuat. Bila berbeda dari server
+        (browser Admin memegang data usang), baris buatan pengguna lain dipertahankan
+        (__preserve_concurrent_rows) sehingga tidak terhapus tanpa sengaja.
+        @transaction.atomic: bila ada kesalahan di tengah jalan, semua perubahan dibatalkan.
         """
         self.__validate_payload(payload)
-        previous = self.get_state()
+        record = self.__state_record(lock=True)  # kunci baris: penyimpan lain menunggu giliran
+        previous = deepcopy(record.data) if record else empty_portal_state()  # "data lama" server
         incoming = deepcopy(payload)
-        incoming = self.__apply_role_boundaries(previous, incoming, actor)
+        incoming = self.__apply_role_boundaries(previous, incoming, actor)  # langkah inti keamanan
+        # Snapshot Admin yang usang (pengguna lain menyimpan sejak Admin memuat data) tidak
+        # boleh menghapus baris yang dibuat mahasiswa/dosen pada selang waktu tersebut.
+        if (actor.role == "admin" and record is not None and base_version is not None
+                and int(base_version) != record.version):
+            incoming = self.__preserve_concurrent_rows(previous, incoming, actor)
 
         # Sinkronkan kredensial akun hanya ketika administrator mengirim daftar akun.
         # Data yang disimpan di JSON tidak pernah berisi kata sandi mentah.
+        # (Hanya Admin yang berhak mengubah akun; peran lain sudah dikunci di langkah sebelumnya.)
         if actor.role == "admin" and isinstance(payload.get("users"), list):
             AccountServiceFactory.sync_records(payload["users"])
 
@@ -240,21 +305,49 @@ class KreasiStateRepository:
             for user_row in incoming.get(field, []):
                 if isinstance(user_row, dict):
                     user_row.pop("password", None)
-        record = self.__state_record()
         if record is None:
             record = AppState(key=self.STATE_KEY, data=incoming, version=1)
-        else:
+            record.save()
+        elif record.data != incoming:
+            # Versi hanya naik bila isi benar-benar berubah; simpan ulang yang identik
+            # tidak memicu penyegaran di klien lain.
             record.data = incoming
             record.version += 1
-        record.save()
+            record.save()
         return deepcopy(record.data), record.version
 
-    def __apply_role_boundaries(self, old: dict, new: dict, actor):
-        """Pusat pembatasan perubahan state sisi server.
+    def __preserve_concurrent_rows(self, old, new, actor):
+        """[Internal] Gabungkan snapshot Admin yang USANG dengan data terbaru server.
 
-        Metode privat ini mencegah otorisasi hanya bergantung pada tombol/menu UI:
-        Admin mengelola akun/master; dosen mengelola proyek terkait; mahasiswa hanya
-        mengubah data miliknya dan tidak dapat memberi persetujuan sendiri.
+        Skenario: Admin membuka halaman, lalu mahasiswa mengajukan prestasi baru. Bila Admin menyimpan
+        sesuatu dengan data lamanya, prestasi baru itu bisa hilang. Method ini mempertahankan baris
+        yang ada di server tetapi tidak ada di snapshot Admin (prestasi, portofolio, undangan, talent
+        pool), menggabungkan notifikasi per pembaca, dan memakai profil mahasiswa versi server.
+        """
+        for key, id_field in (("achievements", "id"), ("portfolios", "id"), ("invitations", "id"),
+                              ("talentPool", "nim")):
+            incoming = [row for row in new.get(key, []) if isinstance(row, dict)]
+            seen = {str(row.get(id_field, "")) for row in incoming}
+            extra = [deepcopy(row) for row in old.get(key, [])
+                     if isinstance(row, dict) and str(row.get(id_field, "")) not in seen]
+            new[key] = incoming + extra
+        new["notifications"] = self.__merge_notifications(old.get("notifications", []), new.get("notifications", []), actor)
+        old_profiles = old.get("studentProfiles", {}) if isinstance(old.get("studentProfiles"), dict) else {}
+        new_profiles = new.get("studentProfiles", {}) if isinstance(new.get("studentProfiles"), dict) else {}
+        new["studentProfiles"] = {**deepcopy(new_profiles), **deepcopy(old_profiles)}
+        return new
+
+    def __apply_role_boundaries(self, old: dict, new: dict, actor):
+        """[Internal] PUSAT aturan "siapa boleh mengubah apa" (otorisasi sisi server).
+
+        Prinsipnya: data dari browser dianggap USULAN. Untuk bagian yang bukan hak peran tsb,
+        usulan diganti dengan data lama server. Pemeriksaan di JavaScript (menu disembunyikan,
+        tombol dinonaktifkan) hanya kenyamanan UI; yang menentukan adalah method ini.
+
+          * ADMIN    : mengelola akun, data master, pengumuman, validasi prestasi, SKPI.
+          * DOSEN    : hanya proyek yang ia miliki/bimbing + undangan & notifikasinya sendiri.
+          * MAHASISWA: hanya data miliknya; tidak bisa menyetujui diri sendiri (status proyek,
+                       validasi prestasi, verifikasi dokumentasi dipulihkan ke nilai server).
         """
         new.setdefault("users", old.get("users", []))
         if actor.role != "admin":
@@ -305,7 +398,12 @@ class KreasiStateRepository:
         return old
 
     def __admin_project_changes(self, old_projects, new_projects, old_users, new_users):
-        """Sesuaikan referensi identitas anggota saat Admin mengubah akun; jaga isi proyek."""
+        """[Internal] Rapikan referensi proyek ketika Admin mengubah/menghapus akun.
+
+        FITUR: Manajemen Akun. Bila NIM/NIP/nama berubah, referensi di proyek ikut diperbarui; bila
+        akun mahasiswa dihapus, keanggotaannya dilepas dan proyek yang ia buat dibersihkan. Isi proyek
+        lain (judul, nilai, dokumen) tidak diubah oleh Admin dari sini.
+        """
         old_user_by_id = {str(row.get("id", "")): row for row in old_users if isinstance(row, dict)}
         new_user_by_id = {str(row.get("id", "")): row for row in new_users if isinstance(row, dict)}
         removed = [row for uid, row in old_user_by_id.items() if uid not in new_user_by_id]
@@ -389,10 +487,10 @@ class KreasiStateRepository:
         return output
 
     def __merge_invitations(self, old_rows, new_rows, actor):
-        """Gabungkan undangan yang dikirim/diterima oleh akun aktif saja.
+        """[Internal] Gabungkan undangan kolaborasi (dosen mengundang mahasiswa dari Talent Pool).
 
-        Data undangan milik pengguna lain dipertahankan agar satu role tidak dapat
-        menghapus atau mengganti undangan dari tampilan state yang telah difilter.
+        Pengguna hanya bisa menambah/mengubah/menghapus undangan MILIKNYA (mahasiswa: yang ditujukan
+        kepadanya; dosen: yang ia kirim). Undangan pihak lain dipertahankan apa adanya.
         """
         identity = str(actor.identifier or "")
         name = str(actor.full_name or "")
@@ -427,10 +525,8 @@ class KreasiStateRepository:
         return output
 
     def __merge_notifications(self, old_rows, new_rows, actor):
-        """Pertahankan isi notifikasi; izinkan perubahan status baca untuk akun sendiri.
-
-        Kunci `readBy` dibedakan menurut role dan identitas agar status baca pengguna lain
-        tidak tertimpa oleh snapshot yang dikirim dari browser.
+        """[Internal] Gabungkan notifikasi: isi lama tak bisa diubah klien, hanya status "sudah dibaca"
+        milik akun sendiri (kunci `readBy`) yang boleh berubah. Notifikasi baru boleh ditambahkan.
         """
         identity = str(actor.identifier or "")
         if actor.role == "admin":
@@ -461,20 +557,27 @@ class KreasiStateRepository:
         return output
 
     def __merge_owned_rows(self, old_rows, new_rows, owner_key, owner_value):
-        """Ganti hanya baris milik identitas tertentu dan pertahankan baris lain."""
+        """[Internal] Ganti hanya baris milik satu identitas (mis. NIM) dan biarkan baris orang lain.
+        Dipakai untuk portofolio dan talent pool milik mahasiswa.
+        """
         retained = [deepcopy(row) for row in old_rows if str(row.get(owner_key, "")) != owner_value]
         changed = [deepcopy(row) for row in new_rows if str(row.get(owner_key, "")) == owner_value]
         return retained + changed
 
     def __merge_profile_map(self, old_map, new_map, owner_value):
-        """Perbarui satu profil mahasiswa tanpa menimpa profil mahasiswa lain."""
+        """[Internal] Perbarui profil satu mahasiswa (bio, keahlian, telepon) tanpa menyentuh profil mahasiswa lain."""
         result = deepcopy(old_map if isinstance(old_map, dict) else {})
         if isinstance(new_map, dict) and owner_value in new_map:
             result[owner_value] = deepcopy(new_map[owner_value])
         return result
 
     def __student_achievement_changes(self, old_rows, new_rows, nim):
-        """Izinkan pengajuan prestasi mahasiswa, tetapi pertahankan hasil validasi Admin."""
+        """[Internal] Aturan prestasi mahasiswa.
+
+        FITUR: Rekam Jejak Prestasi. Mahasiswa boleh MENGAJUKAN prestasi (status awal otomatis
+        "Menunggu Validasi") dan mengedit data pengajuan, tetapi `status`, `validatedBy`, dan
+        `validatedAt` selalu dipulihkan dari server: hanya Admin yang menentukan hasil validasi.
+        """
         old_by_id = {str(row.get("id")): row for row in old_rows if str(row.get("nim", "")) == nim}
         retained = [deepcopy(row) for row in old_rows if str(row.get("nim", "")) != nim]
         changed = []
@@ -496,10 +599,14 @@ class KreasiStateRepository:
         return retained + changed
 
     def __student_project_changes(self, old_projects, new_projects, nim):
-        """Batasi mahasiswa pada proyek terkait dan jangan izinkan persetujuan mandiri.
+        """[Internal] Aturan perubahan proyek oleh mahasiswa.
 
-        Perubahan kandidat dibandingkan dengan snapshot tersimpan; status proyek, pemilik,
-        dan status verifikasi dokumentasi yang ditetapkan pihak berwenang tetap dikunci.
+        FITUR: Bursa Proyek, Usulkan Proyek, Proyek Saya.
+          * Proyek baru buatan mahasiswa selalu berstatus "Diajukan" (menunggu tinjauan dosen).
+          * Pada proyek orang lain, data inti (judul, kategori, kuota, dsb.) dikunci; mahasiswa
+            hanya boleh ikut serta/mendaftar.
+          * Status proyek & kepemilikan dosen tidak bisa diubah mahasiswa.
+          * Proyek yang tidak ikut terkirim tidak dihapus oleh sesi mahasiswa.
         """
         old_by_id = {str(item.get("id")): item for item in old_projects}
         output = []
@@ -549,7 +656,11 @@ class KreasiStateRepository:
         return output
 
     def __keep_student_milestone_status(self, old_project, new_project):
-        """Pulihkan status verifikasi dari server agar mahasiswa tidak menyetujui dokumen sendiri."""
+        """[Internal] Cegah mahasiswa menyetujui dokumentasinya sendiri.
+
+        FITUR: Dokumentasi tahapan proyek (milestone). Status "Disetujui", `verifiedBy`, `verifiedAt`,
+        dan `reviewNote` dipulihkan dari server; verifikasi hanya hak dosen.
+        """
         def keep(old_rows, new_rows):
             old_by_key = {str(row.get("key", row.get("id", ""))): row for row in old_rows if isinstance(row, dict)}
             for row in new_rows:
@@ -575,7 +686,13 @@ class KreasiStateRepository:
                  group.get("milestones", []) if isinstance(group.get("milestones"), list) else [])
 
     def __lecturer_project_changes(self, old_projects, new_projects, nip):
-        """Terima perubahan hanya pada proyek yang dapat dikelola dosen yang aktif."""
+        """[Internal] Aturan perubahan proyek oleh dosen.
+
+        FITUR: Manajemen Proyek (dosen). Bila proyek sudah punya pemilik (`ownerNip`), hanya pemilik
+        itu yang boleh mengubah/menghapus. Bila belum, boleh oleh pembimbing/pembuat, atau
+        dosen yang meninjau usulan berstatus "Diajukan" pada kategori selain Proyek Mata Kuliah /
+        Informatika untuk Masyarakat. Proyek orang lain dikembalikan ke nilai lama.
+        """
         old_by_id = {str(item.get("id")): item for item in old_projects}
         output, seen = [], set()
         for candidate in new_projects:

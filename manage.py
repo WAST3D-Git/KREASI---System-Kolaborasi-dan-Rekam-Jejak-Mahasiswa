@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Utilitas command line untuk menjalankan tugas administrasi Django."""
+"""Perintah administrasi Django: migrate, runserver, create_kreasi_admin, dll."""
 import os
 import sys
 

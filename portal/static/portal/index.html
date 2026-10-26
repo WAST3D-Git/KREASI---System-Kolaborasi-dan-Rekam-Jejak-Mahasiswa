@@ -322,6 +322,33 @@ tailwind.config = {
    KREASI — Sistem Kolaborasi & Rekam Jejak Prestasi Mahasiswa
    ========================================================================== */
 
+/* ============================================================================
+   PETA FRONTEND (untuk memudahkan membaca & presentasi)
+   Seluruh tampilan ada di SATU file ini. Alur: render() memilih halaman sesuai
+   state.currentView -> setiap halaman membuat HTML dari objek data `db`.
+
+   BAGIAN                     FUNGSI UTAMA                             FITUR
+   -------------------------  ---------------------------------------  ---------------------------
+   Jembatan ke backend        kreasiApi, saveDB, storeUploadedDocument Semua penyimpanan data & berkas
+   Sinkronisasi               kreasiSyncFromServer (bagian INIT)       Data terbaru antar perangkat
+   Router                     render, switchView                       Pindah halaman
+   Landing & Login            renderLanding, renderLogin,              Beranda, tombol Masuk/Keluar
+                              handleLoginSubmit, doLogout
+   Portal Mahasiswa           renderStudentShell/Content, studentXxx   Dashboard, Profil & Talenta,
+                              (menu: dashboard, profile, achievements, Prestasi, SKPI, Bursa Proyek,
+                              projects, myprojects, skpi)              Proyek Saya
+   Portal Dosen               renderLecturerShell/Content, lecturerXxx Talent Pool, Manajemen Proyek,
+                                                                       verifikasi dokumentasi, nilai
+   Portal Admin               renderAdminShell/Content, adminXxx       Manajemen Akun, Validasi
+                              (menu: users, validation, announcements, Prestasi, Pengumuman, Data
+                              master, skpi)                            Master, Rekapitulasi & SKPI
+   Aturan akses proyek        bagian "ROLE-BASED ACCESS CONTROL"       Proyek apa yang terlihat
+   Dialog (modal)             openModal, closeModal, showToast         Formulir, konfirmasi, pesan
+
+   CATATAN KEAMANAN: aturan di JavaScript hanya untuk kenyamanan tampilan. Pemeriksaan hak
+   akses yang sebenarnya dilakukan server (portal/repository.py dan portal/views.py).
+   ========================================================================== */
+
 const APP = {
   name: 'KREASI',
   long: 'Sistem Kolaborasi & Rekam Jejak Prestasi Mahasiswa',
@@ -1302,10 +1329,15 @@ function loadDB(serverData = null) {
    tetap dijalankan di backend; validasi/penyembunyian menu JavaScript bukan batas keamanan. */
 let __kreasiSaveQueue = Promise.resolve();
 let __kreasiLastSaveError = '';
+let __kreasiVersion = null;       // versi snapshot server yang terakhir dimuat/disimpan klien ini
+let __kreasiPending = 0;          // jumlah penyimpanan yang masih antre
+let __kreasiSuppressSave = false; // true saat memuat ulang dari server (hindari simpan balik)
 function readCookie(name) {
   const part = document.cookie.split(';').map(v => v.trim()).find(v => v.startsWith(name + '='));
   return part ? decodeURIComponent(part.slice(name.length + 1)) : '';
 }
+/* Pembungkus fetch() ke backend: menyertakan cookie sesi dan token CSRF pada permintaan
+   tulis, mengubah respons JSON, dan melempar Error bila server menolak (mis. 401/403). */
 async function kreasiApi(url, options = {}) {
   const opts = { credentials: 'same-origin', ...options };
   const headers = new Headers(opts.headers || {});
@@ -1332,14 +1364,20 @@ function safeStateWithoutPasswords(source) {
   (safe.users || []).forEach(user => { if (user && typeof user === 'object') delete user.password; });
   return safe;
 }
+/* FITUR PENYIMPANAN: dipanggil setelah hampir setiap aksi pengguna. Mengirim salinan `db` ke
+   POST /api/state/ lewat antrean (urutan terjaga). Server yang memutuskan bagian mana yang
+   benar-benar boleh tersimpan menurut peran. */
 function saveDB() {
   if (!db) return false;
   try {
     const snapshot = JSON.parse(JSON.stringify(db));
     if (!state.userRole) return true; // The landing page never persists anonymous client data.
+    if (__kreasiSuppressSave) return true;
+    __kreasiPending++;
     __kreasiSaveQueue = __kreasiSaveQueue.then(() => kreasiApi('/api/state/', {
-      method: 'POST', body: JSON.stringify({ state: snapshot })
-    })).then(() => {
+      method: 'POST', body: JSON.stringify({ state: snapshot, baseVersion: __kreasiVersion })
+    })).then(result => {
+      if (result && Number.isInteger(result.version)) __kreasiVersion = result.version;
       __kreasiLastSaveError = '';
     }).catch(error => {
       console.error('KREASI: state tidak berhasil disimpan ke Django', error);
@@ -1347,7 +1385,7 @@ function saveDB() {
         showToast(error.status === 401 ? 'Sesi login berakhir. Masuk kembali untuk menyimpan perubahan.' : (error.message || 'Perubahan gagal disimpan ke server.'), 'error');
       }
       __kreasiLastSaveError = error.message;
-    });
+    }).finally(() => { __kreasiPending = Math.max(0, __kreasiPending - 1); });
     // Kata sandi hanya dikirim sekali ke backend untuk dibuat hash; jangan disimpan di browser.
     (db.users || []).forEach(user => { if (user && typeof user === 'object') delete user.password; });
     return true;
@@ -2293,7 +2331,7 @@ function openRegistrationInfoModal() {
         <div class="p-3.5 rounded-2xl bg-white border border-slate-200">
           <p class="text-2xs font-bold text-slate-500 uppercase">Kontak Admin</p>
           <p class="text-xs font-semibold text-slate-800 mt-1">${esc(SEED.admin.name)}</p>
-          <p class="text-2xs text-slate-500 mt-1">${esc(SEED.admin.email)}</p>
+          <p class="text-2xs text-slate-500 mt-1">${esc(SEED.admin.email || 'admin@unmul.ac.id')}</p>
         </div>
         <div class="p-3.5 rounded-2xl bg-white border border-slate-200">
           <p class="text-2xs font-bold text-slate-500 uppercase">Lokasi Layanan</p>
@@ -2347,6 +2385,8 @@ function applyLoggedInProfile(user) {
   }
 }
 
+/* FITUR LOGIN: kirim username/sandi/peran ke server (views.login_view). Bila berhasil,
+   ambil data sesuai peran (GET /api/state/) lalu buka portal. Gagal -> pesan generik. */
 async function handleLoginSubmit(e) {
   e.preventDefault();
   const username = ($('login-username')?.value || '').trim();
@@ -2363,6 +2403,7 @@ async function handleLoginSubmit(e) {
     state.userRole = result.user.role;
     applyLoggedInProfile(result.user);
     const response = await kreasiApi('/api/state/');
+    __kreasiVersion = Number.isInteger(response.version) ? response.version : null;
     loadDB(response.state);
     applyLoggedInProfile(result.user);
     loginAs(result.user.role);
@@ -2391,6 +2432,7 @@ function logout() {
   openModal({ title: 'Keluar dari sistem?', subtitle: 'Perubahan yang belum disimpan dapat hilang.', size: 'sm', body: `
     <div class="flex justify-end gap-2"><button onclick="closeModal()" class="btn btn-secondary">Batal</button><button onclick="closeModal(); doLogout()" class="btn btn-primary">Ya, Keluar</button></div>` });
 }
+/* FITUR LOGOUT: tunggu penyimpanan yang antre selesai, akhiri sesi di server, kembali ke beranda. */
 async function doLogout() {
   try { await __kreasiSaveQueue; await kreasiApi('/api/auth/logout/', { method: 'POST', body: '{}' }); }
   catch (error) { console.warn('KREASI: penutupan sesi server tidak tuntas', error); }
@@ -8858,6 +8900,8 @@ window.addEventListener('unhandledrejection',event=>{console.error('KREASI unhan
 /* ============================================================================
    INIT
    ========================================================================== */
+/* Dijalankan saat halaman dibuka: bila sesi login server masih aktif, langsung masuk ke portal
+   (tidak perlu login ulang setelah refresh); bila tidak, tampilkan beranda. */
 async function initializeKreasi() {
   try {
     const session = await kreasiApi('/api/session/');
@@ -8865,6 +8909,7 @@ async function initializeKreasi() {
       state.userRole = session.user.role;
       applyLoggedInProfile(session.user);
       const response = await kreasiApi('/api/state/');
+      __kreasiVersion = Number.isInteger(response.version) ? response.version : null;
       loadDB(response.state);
       applyLoggedInProfile(session.user);
       loginAs(session.user.role);
@@ -8878,6 +8923,50 @@ async function initializeKreasi() {
   render();
 }
 window.addEventListener('DOMContentLoaded', initializeKreasi);
+
+/* Sinkronisasi antar pengguna: periksa versi data server secara berkala dan muat ulang
+   tampilan bila pengguna lain menyimpan perubahan. Penyegaran ditunda selama ada
+   penyimpanan antre, dialog terbuka, atau pengguna sedang mengetik. */
+let __kreasiRefreshing = false;
+function kreasiUserIsBusy(ignoreRefreshing = false) {
+  if (__kreasiPending > 0 || (__kreasiRefreshing && !ignoreRefreshing)) return true;
+  const modal = $('modal-root');
+  if (modal && modal.innerHTML.trim() !== '') return true;
+  const active = document.activeElement;
+  return !!(active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) && active.type !== 'button' && $('app')?.contains(active));
+}
+async function kreasiSyncFromServer() {
+  if (!state.userRole || !db || document.hidden || kreasiUserIsBusy()) return;
+  __kreasiRefreshing = true;
+  try {
+    const head = await kreasiApi('/api/state/version/');
+    if (head.version === __kreasiVersion) return;
+    const session = await kreasiApi('/api/session/');
+    if (!session.authenticated) throw Object.assign(new Error('Sesi login berakhir.'), { status: 401 });
+    const response = await kreasiApi('/api/state/');
+    if (kreasiUserIsBusy(true)) return; // pengguna mulai berinteraksi selama pengambilan data; coba lagi nanti
+    const scrolls = [...($('app')?.querySelectorAll('*') || [])].map(el => el.scrollTop);
+    const pageY = window.scrollY;
+    __kreasiSuppressSave = true;
+    try {
+      __kreasiVersion = Number.isInteger(response.version) ? response.version : head.version;
+      loadDB(response.state);
+      applyLoggedInProfile(session.user);
+      render();
+    } finally { __kreasiSuppressSave = false; }
+    [...($('app')?.querySelectorAll('*') || [])].forEach((el, i) => { if (scrolls[i]) el.scrollTop = scrolls[i]; });
+    window.scrollTo(0, pageY);
+  } catch (error) {
+    if (error.status === 401) {
+      state.userRole = null; state.currentView = 'landing'; db = null; render();
+      showToast('Sesi login berakhir. Silakan masuk kembali.', 'info');
+    } else {
+      console.warn('KREASI: sinkronisasi dengan server tertunda', error);
+    }
+  } finally { __kreasiRefreshing = false; }
+}
+setInterval(kreasiSyncFromServer, 10000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) kreasiSyncFromServer(); });
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeModal();

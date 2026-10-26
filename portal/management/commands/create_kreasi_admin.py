@@ -1,4 +1,15 @@
-"""Perintah Django untuk membuat/memperbarui administrator awal KREASI."""
+"""Perintah terminal untuk membuat akun ADMIN pertama.
+
+Mengapa perlu? Aplikasi tidak menyertakan akun contoh; akun mahasiswa dan dosen dibuat oleh
+Admin melalui menu Manajemen Akun. Admin pertama harus dibuat lewat terminal:
+
+    python manage.py create_kreasi_admin --username admin
+
+Sandi diminta lewat prompt tersembunyi, atau dari variabel KREASI_ADMIN_PASSWORD bila tanpa
+terminal (hosting). Opsi --only-if-missing membuat perintah aman dijalankan di setiap deploy.
+"""
+import os
+import sys
 from getpass import getpass
 
 from django.contrib.auth import get_user_model
@@ -13,25 +24,37 @@ from portal.models import AppState
 User = get_user_model()
 
 class Command(BaseCommand):
-    """Pewarisan tunggal dari `BaseCommand`, sesuai konvensi custom command Django.
-
-    Django memanggil `add_arguments()` untuk konfigurasi CLI dan `handle()` untuk alur
-    pembuatan akun. Transaksi menjaga akun administrator dan state awal tetap konsisten.
+    """OOP: PEWARISAN TUNGGAL dari `BaseCommand` (bawaan Django). Django otomatis mengenali file
+    di folder management/commands sebagai perintah `manage.py <nama-file>`. Kita mengisi dua
+    method yang dipanggil Django: add_arguments() (opsi CLI) dan handle() (isi perintah).
+    @transaction.atomic membuat akun admin dan data awal tersimpan bersamaan atau batal bersamaan.
     """
     help = "Membuat akun administrator awal KREASI tanpa data demo."
 
     def add_arguments(self, parser):
-        """Daftarkan opsi command tanpa memasukkan kredensial sebagai nilai wajib."""
+        """Mendaftarkan opsi: --username, --password, --name, --email, --only-if-missing."""
         parser.add_argument("--username", default="admin")
         parser.add_argument("--password", default=None)
         parser.add_argument("--name", default="Administrator Program Studi")
         parser.add_argument("--email", default="")
+        parser.add_argument("--only-if-missing", action="store_true",
+                            help="Lewati bila akun sudah ada (aman dijalankan di setiap deploy).")
 
     @transaction.atomic
     def handle(self, *args, **options):
-        """Validasi password, simpan akun dengan hash, lalu siapkan state kosong."""
+        """Isi perintah: (1) lewati bila --only-if-missing dan akun ada; (2) ambil sandi; (3) buat/perbarui
+        akun admin (sandi di-hash, dicek kebijakan keamanan); (4) catat admin di data aplikasi (AppState)
+        agar tampil di menu Manajemen Akun.
+        """
         username = options["username"].strip()
-        password = options["password"] or getpass("Kata sandi administrator (minimal 8 karakter): ")
+        if options["only_if_missing"] and User.objects.filter(username=username).exists():
+            self.stdout.write(f"Akun '{username}' sudah ada; dilewati.")
+            return
+        password = options["password"] or os.environ.get("KREASI_ADMIN_PASSWORD")
+        if not password:
+            if not sys.stdin.isatty():
+                raise CommandError("Tanpa terminal interaktif, set KREASI_ADMIN_PASSWORD atau gunakan --password.")
+            password = getpass("Kata sandi administrator (minimal 8 karakter): ")
         if len(password) < 8:
             raise CommandError("Kata sandi minimal 8 karakter.")
         name = options["name"].strip() or "Administrator Program Studi"
