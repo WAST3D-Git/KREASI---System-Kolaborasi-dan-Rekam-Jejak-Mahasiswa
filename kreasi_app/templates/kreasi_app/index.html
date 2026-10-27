@@ -322,33 +322,6 @@ tailwind.config = {
    KREASI — Sistem Kolaborasi & Rekam Jejak Prestasi Mahasiswa
    ========================================================================== */
 
-/* ============================================================================
-   PETA FRONTEND (untuk memudahkan membaca & presentasi)
-   Seluruh tampilan ada di SATU file ini. Alur: render() memilih halaman sesuai
-   state.currentView -> setiap halaman membuat HTML dari objek data `db`.
-
-   BAGIAN                     FUNGSI UTAMA                             FITUR
-   -------------------------  ---------------------------------------  ---------------------------
-   Jembatan ke backend        kreasiApi, saveDB, storeUploadedDocument Semua penyimpanan data & berkas
-   Sinkronisasi               kreasiSyncFromServer (bagian INIT)       Data terbaru antar perangkat
-   Router                     render, switchView                       Pindah halaman
-   Landing & Login            renderLanding, renderLogin,              Beranda, tombol Masuk/Keluar
-                              handleLoginSubmit, doLogout
-   Portal Mahasiswa           renderStudentShell/Content, studentXxx   Dashboard, Profil & Talenta,
-                              (menu: dashboard, profile, achievements, Prestasi, SKPI, Bursa Proyek,
-                              projects, myprojects, skpi)              Proyek Saya
-   Portal Dosen               renderLecturerShell/Content, lecturerXxx Talent Pool, Manajemen Proyek,
-                                                                       verifikasi dokumentasi, nilai
-   Portal Admin               renderAdminShell/Content, adminXxx       Manajemen Akun, Validasi
-                              (menu: users, validation, announcements, Prestasi, Pengumuman, Data
-                              master, skpi)                            Master, Rekapitulasi & SKPI
-   Aturan akses proyek        bagian "ROLE-BASED ACCESS CONTROL"       Proyek apa yang terlihat
-   Dialog (modal)             openModal, closeModal, showToast         Formulir, konfirmasi, pesan
-
-   CATATAN KEAMANAN: aturan di JavaScript hanya untuk kenyamanan tampilan. Pemeriksaan hak
-   akses yang sebenarnya dilakukan server (portal/repository.py dan portal/views.py).
-   ========================================================================== */
-
 const APP = {
   name: 'KREASI',
   long: 'Sistem Kolaborasi & Rekam Jejak Prestasi Mahasiswa',
@@ -374,64 +347,90 @@ function semesterForCohort(angkatan, date = new Date()) {
     : (((year - 1) - cohortYear) * 2 + 2);
   return `Semester ${Math.max(1, semester)}`;
 }
-const LEGACY_DEMO_STUDENT_NIM = '__NO_LEGACY_ACCOUNT__';
-const DEMO_ACHIEVEMENT_IDS = new Set();
-const DEMO_ACHIEVEMENT_TITLES = new Set();
+const LEGACY_DEMO_STUDENT_NIM = '2110512001';
+const DEMO_ACHIEVEMENT_IDS = new Set(['ACH-001','ACH-002','ACH-003','ACH-004','ACH-005','ACH-006','ACH-007']);
+const DEMO_ACHIEVEMENT_TITLES = new Set([
+  'Juara 2 Hackathon Nasional GovTech 2025',
+  'Publikasi Jurnal Nasional Terakreditasi SINTA 3',
+  'Sertifikasi AWS Certified Cloud Practitioner',
+  'Asisten Laboratorium Pemrograman Lanjut 2025/2026',
+  'Juara 1 Lomba Desain UI/UX Dies Natalis UNMUL',
+  'Pengabdian Masyarakat — Digitalisasi Desa Wisata Pampang',
+  'Magang Bersertifikat (MBKM) di PT Solusi Digital Nusantara'
+]);
 
-/* File bridge frontend -> Django: `storeUploadedDocument()` mengirim data binernya ke view
-   `document_upload`, yang membuat `UploadedDocument` dan menyimpan FileField di MEDIA_ROOT.
-   ID yang dikembalikan menjadi referensi server; pratinjau/penghapusan memanggil endpoint lain.
-   Pemeriksaan role/kepemilikan dilakukan server, bukan hanya oleh komponen file picker ini. */
+/*
+ * Semua penyimpanan penting terhubung ke API Django.
+ * Cookie CSRF dipakai agar permintaan perubahan data berasal dari halaman aplikasi ini.
+ */
+function getCookie(name) {
+  const match = document.cookie.split('; ').find(row => row.startsWith(name + '='));
+  return match ? decodeURIComponent(match.split('=').slice(1).join('=')) : '';
+}
+
+// Pembungkus fetch supaya permintaan POST, PUT, dan DELETE membawa token keamanan Django.
+function apiRequest(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  const method = String(options.method || 'GET').toUpperCase();
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    const token = getCookie('csrftoken');
+    if (token) headers.set('X-CSRFToken', token);
+  }
+  return fetch(url, { ...options, headers, credentials: 'same-origin' });
+}
+
+// Menyimpan isi file di server Django dan mengembalikan ID untuk ditautkan pada data proyek/prestasi.
 async function storeUploadedDocument(file, metadata = {}) {
   if (!file) return null;
   const form = new FormData();
-  form.append('file', file, file.name);
-  form.append('metadata', JSON.stringify(metadata));
-  const result = await kreasiApi('/api/documents/upload/', { method: 'POST', body: form });
+  form.append('file', file);
+  form.append('metadata', JSON.stringify(metadata || {}));
+  const response = await apiRequest('/api/documents/', { method: 'POST', body: form });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || 'Berkas gagal disimpan ke server.');
   return result.id;
 }
+
+// Menghapus salinan berkas dari server saat pengguna membatalkan atau mengganti lampiran.
 async function removeStoredDocument(id) {
   if (!id) return;
-  await kreasiApi(`/api/documents/${encodeURIComponent(id)}/delete/`, { method: 'POST', body: '{}' });
-}
-async function getStoredDocument(id) {
-  if (!id) throw new Error('Berkas ini belum tersimpan di server.');
-  const response = await fetch(`/api/documents/${encodeURIComponent(id)}/`, { credentials: 'same-origin' });
-  const type = response.headers.get('content-type') || '';
-  if (!response.ok) {
-    let message = 'Berkas tidak dapat dibaca dari server.';
-    if (type.includes('application/json')) {
-      try { message = (await response.json()).message || message; } catch (_) {}
-    }
-    throw new Error(message);
+  const response = await apiRequest(`/api/documents/${encodeURIComponent(id)}/`, { method: 'DELETE' });
+  if (!response.ok && response.status !== 404) {
+    const result = await response.json().catch(() => ({}));
+    throw new Error(result.error || 'Berkas gagal dihapus dari server.');
   }
-  const encodedName = response.headers.get('X-Document-Name') || 'dokumen';
-  let name = encodedName;
-  try { name = decodeURIComponent(encodedName); } catch (_) {}
-  return { id, name, type: response.headers.get('Content-Type') || 'application/octet-stream', blob: await response.blob() };
 }
+
 function ensureFilePicker(inputId, statusId) {
   const input = $(inputId);
   const status = $(statusId);
   if (!input) return null;
-  if (input.dataset.filePickerReady === 'true') return {
-    input, status, name: input.parentElement?.querySelector('.file-picker-name'),
-    remove: input.parentElement?.querySelector('.file-picker-remove')
-  };
+  if (input.dataset.filePickerReady === 'true') {
+    return {
+      input,
+      status,
+      name: input.parentElement?.querySelector('.file-picker-name'),
+      remove: input.parentElement?.querySelector('.file-picker-remove')
+    };
+  }
+
   const wrapper = document.createElement('div');
   wrapper.className = 'file-picker';
   input.parentNode.insertBefore(wrapper, input);
   input.className = 'file-picker-native';
   input.removeAttribute('style');
   wrapper.appendChild(input);
+
   const trigger = document.createElement('span');
   trigger.className = 'file-picker-trigger';
   trigger.textContent = 'Pilih File';
   trigger.setAttribute('aria-hidden', 'true');
+
   const name = document.createElement('span');
   name.className = 'file-picker-name';
   name.textContent = 'Belum ada berkas dipilih';
   name.setAttribute('aria-hidden', 'true');
+
   const remove = document.createElement('button');
   remove.type = 'button';
   remove.className = 'file-picker-remove';
@@ -439,8 +438,11 @@ function ensureFilePicker(inputId, statusId) {
   remove.title = 'Hapus berkas';
   remove.innerHTML = '<i class="fa-solid fa-xmark" aria-hidden="true"></i>';
   remove.addEventListener('click', event => {
-    event.preventDefault(); event.stopPropagation(); clearSelectedFile(inputId, statusId);
+    event.preventDefault();
+    event.stopPropagation();
+    clearSelectedFile(inputId, statusId);
   });
+
   wrapper.append(trigger, name, remove);
   input.dataset.filePickerReady = 'true';
   input.dataset.fileStatusId = statusId;
@@ -452,9 +454,15 @@ function updateSelectedFileStatus(inputId, statusId) {
   if (!picker) return;
   const file = picker.input.files && picker.input.files[0];
   const size = file ? ` (${Math.ceil(file.size / 1024)} KB)` : '';
-  if (picker.name) { picker.name.textContent = file ? `${file.name}${size}` : 'Belum ada berkas dipilih'; picker.name.title = file ? file.name : ''; }
+  if (picker.name) {
+    picker.name.textContent = file ? `${file.name}${size}` : 'Belum ada berkas dipilih';
+    picker.name.title = file ? file.name : '';
+  }
   if (picker.remove) picker.remove.style.display = file ? 'inline-flex' : 'none';
-  if (picker.status) { picker.status.textContent = file ? `Berkas dipilih: ${file.name}${size}` : 'Belum ada berkas dipilih.'; picker.status.classList.add('sr-only'); }
+  if (picker.status) {
+    picker.status.textContent = file ? `Berkas dipilih: ${file.name}${size}` : 'Belum ada berkas dipilih.';
+    picker.status.classList.add('sr-only');
+  }
 }
 function clearSelectedFile(inputId, statusId) {
   const input = $(inputId);
@@ -468,6 +476,21 @@ function initializeFilePickers(root = document) {
     const match = inlineHandler.match(/updateSelectedFileStatus\('([^']+)'\s*,\s*'([^']+)'\)/);
     if (match) updateSelectedFileStatus(match[1], match[2]);
   });
+}
+// Mengambil isi berkas dari Django agar dapat dipratinjau atau diunduh oleh fitur lama.
+async function getStoredDocument(id) {
+  if (!id) return null;
+  const response = await apiRequest(`/api/documents/${encodeURIComponent(id)}/`);
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    throw new Error(result.error || 'Berkas tidak dapat dibaca dari server.');
+  }
+  const encodedName = response.headers.get('X-Document-Name') || 'dokumen';
+  let name = 'dokumen';
+  try { name = decodeURIComponent(encodedName); } catch (_) { name = encodedName; }
+  const blob = await response.blob();
+  return { id, name, type: blob.type || 'application/octet-stream', size: blob.size, blob };
 }
 
 function studentCanAccessGroupDocument(fileId) {
@@ -492,9 +515,9 @@ async function openStoredDocument(id) {
   // Buka tab sinkron dengan klik pengguna agar pemblokir pop-up tidak menutup pratinjau.
   const tab = window.open('about:blank', '_blank');
   try {
-    if (!id) throw new Error('Berkas ini belum tersimpan pada penyimpanan dokumen server.');
+    if (!id) throw new Error('Berkas ini belum tersimpan pada penyimpanan dokumen.');
     const record = await getStoredDocument(id);
-    if (!record || !record.blob) throw new Error('Berkas tidak ditemukan di server. Unggah ulang berkas aslinya.');
+    if (!record || !record.blob) throw new Error('Berkas tidak ditemukan. Untuk dokumen lama, unggah ulang berkas aslinya.');
     const url = URL.createObjectURL(record.blob);
     if (tab) {
       tab.opener = null;
@@ -524,7 +547,7 @@ async function downloadStoredDocument(id) {
   try {
     if (!id) throw new Error('Berkas ini belum memiliki file yang tersimpan.');
     const record = await getStoredDocument(id);
-    if (!record || !record.blob) throw new Error('Berkas fisik tidak ditemukan di server. Minta mahasiswa mengunggah ulang berkas aslinya.');
+    if (!record || !record.blob) throw new Error('Berkas fisik tidak ditemukan. Minta mahasiswa mengunggah ulang berkas aslinya.');
     const url = URL.createObjectURL(record.blob);
     const link = document.createElement('a');
     link.href = url;
@@ -545,7 +568,7 @@ async function downloadStoredDocument(id) {
 const PROJECT_CATEGORIES_BY_ROLE = {
   student: [
     'Proyek Mata Kuliah',
-    'Informatika untuk Masyarakat',
+    'Informatika Untuk Masyarakat',
     'Kompetisi',
     'Magang',
     'Wirausaha',
@@ -569,7 +592,7 @@ const PROJECT_CATEGORIES_BY_ROLE = {
 };
 
 const DEFAULT_PROJECT_CATEGORIES = [
-  'Informatika untuk Masyarakat',
+  'Informatika Untuk Masyarakat',
   'Proyek Mata Kuliah',
   'Kompetisi',
   'Magang',
@@ -595,7 +618,7 @@ const PUBLIC_PROJECT_CATEGORIES = [
 
 /* Kategori khusus dengan aturan visibilitas ketat */
 const COURSE_CATEGORY = 'Proyek Mata Kuliah';
-const COMMUNITY_CATEGORY = 'Informatika untuk Masyarakat';
+const COMMUNITY_CATEGORY = 'Informatika Untuk Masyarakat';
 const STATUS_ACTIVE = 'Active';
 const isCourseProject = p => !!p && p.category === COURSE_CATEGORY;
 const isIndividualCourseProject = p => isCourseProject(p) && p.individualCourse === true;
@@ -708,8 +731,7 @@ function getLecturerCourses(nip) {
   return lect.mataKuliahDiampu;
 }
 
-// Nama mata kuliah dapat tercatat sebagai "Informatika untuk Masyarakat"
-// atau "KKN / Informatika untuk Masyarakat" sesuai data master.
+// Nama mata kuliah komunitas menggunakan satu label kanonis.
 function isCommunityCourseName(course) {
   return String(course || '').toLocaleLowerCase('id-ID').replace(/\s+/g, ' ').trim()
     .includes('informatika untuk masyarakat');
@@ -732,9 +754,7 @@ function communityCourseName() {
     ...(((db && db.masterData && db.masterData.courseOfferings) || []).map(item => item.course)),
     ...((db && db.users) || []).flatMap(user => user.role === 'lecturer' ? (user.mataKuliahDiampu || []).map(item => item.course) : [])
   ].filter(Boolean);
-  return all.find(course => /\bkkn\b/i.test(String(course)) && isCommunityCourseName(course))
-    || all.find(isCommunityCourseName)
-    || 'KKN / Informatika untuk Masyarakat';
+  return all.find(isCommunityCourseName) || 'Informatika Untuk Masyarakat';
 }
 
 /* Cek apakah mahasiswa termasuk dalam lingkup MK yang diampu dosen */
@@ -750,22 +770,29 @@ function isStudentInLecturerScope(nim, nip) {
   });
 }
 
-/* Usulan proyek yang dapat ditinjau dosen. Proyek mata kuliah hanya muncul bagi dosen pembimbingnya. */
+/* Usulan proyek dirutekan ke dosen yang dipilih mahasiswa. Usulan tanpa dosen tujuan
+   tetap dapat ditinjau semua dosen yang berwenang. */
 function proposalsForRole(role) {
   if (role !== 'lecturer') return [];
   const all = (db.projects || []).filter(p => p.status === 'Diajukan' && !p.ownerNip);
-  const nip = SEED.lecturer && SEED.lecturer.nip;
-  // Usulan proyek umum dibuka ke seluruh dosen; proyek mata kuliah hanya untuk dosen pengampu/pembimbingnya.
-  return all.filter(p => !isCourseProject(p) || (p.supervisorNip && p.supervisorNip === nip));
+  const nip = String((SEED.lecturer && SEED.lecturer.nip) || '');
+  return all.filter(p => {
+    const assignedNip = String(p.supervisorNip || '').trim();
+    if (assignedNip) return assignedNip === nip;
+    // Tanpa dosen tujuan, proyek umum/IUM dapat ditinjau oleh dosen; proyek mata kuliah
+    // harus memiliki dosen pengampu yang jelas.
+    return !isCourseProject(p);
+  });
 }
 function projectCreatorLabel(p) {
-  if (!p) return 'Pembuat Proyek';
+  if (!p) return '';
   const role = String(p.creatorRole || '');
-  if (p.studentCreated === true || /mahasiswa|pengusul|ketua tim/i.test(role)) return 'Pengusul Proyek';
-  if (/dosen/i.test(role)) return 'Pembuat Proyek';
-  if (p.creatorNim) return 'Pengusul Proyek';
-  if (p.creatorNip) return 'Pembuat Proyek';
-  return 'Pembuat Proyek';
+  // Identitas pembuat tetap ditampilkan untuk usulan mahasiswa.
+  // Untuk proyek buatan dosen, label pembuat dihilangkan karena dosen tersebut
+  // otomatis menjadi dosen pembimbing dan ditampilkan pada field tersendiri.
+  if (p.studentCreated === true || /mahasiswa|pengusul|ketua tim/i.test(role) || p.creatorNim) return 'Pengusul Proyek';
+  if (/dosen/i.test(role) || p.creatorNip) return '';
+  return '';
 }
 
 function categoriesForRole(role) {
@@ -843,6 +870,7 @@ function projectMemberCountLabel(p) {
   const limit = projectMemberLimit(p);
   return limit > 0 ? `${count} dari ${limit} orang` : `${count} orang (tanpa kuota tetap)`;
 }
+// Menghitung dokumen yang sudah disetujui agar indikator progres setiap kelompok mengikuti status nyata.
 function groupProgress(g) {
   const total = g.milestones.length;
   const done = g.milestones.filter(m => m.status === 'Disetujui').length;
@@ -967,6 +995,7 @@ function isDocumentationComplete(target) {
   return !!target && Array.isArray(target.milestones) && target.milestones.length > 0
     && target.milestones.every(m => m.status === 'Disetujui');
 }
+// Proyek/kelompok baru dapat ditandai selesai setelah seluruh tahapan dokumentasi disetujui dosen.
 function markProjectComplete(projectId, groupId) {
   const p = getProject(projectId);
   if (!p || !canApproveProject(p, 'lecturer', SEED.lecturer)) { showToast('Anda tidak berwenang menandai proyek ini selesai.', 'error'); return; }
@@ -990,6 +1019,7 @@ function setProjectGradingMode(projectId, mode) {
 function getGrade(target) {
   return target && target.grade ? target.grade : null;
 }
+// Mengubah nilai numerik menjadi predikat huruf yang dipakai pada fitur penilaian proyek.
 function scoreToLetter(score) {
   if (score >= 85) return 'A';
   if (score >= 80) return 'A-';
@@ -1014,6 +1044,7 @@ function gradeColorClass(letter) {
    ROLE-BASED ACCESS CONTROL (RBAC) — VISIBILITAS PROYEK
    ========================================================================== */
 
+// Aturan visibilitas ini mempertahankan pemisahan proyek umum, mata kuliah, dan IUM sesuai versi HTML asal.
 function canViewProject(p, role, identity) {
   if (!p || (role !== 'student' && role !== 'lecturer')) return false;
 
@@ -1052,7 +1083,7 @@ function canViewProject(p, role, identity) {
     return false;
   }
 
-  /* 3. Proyek "Informatika untuk Masyarakat" */
+  /* 3. Proyek "Informatika Untuk Masyarakat" */
   if (cat === COMMUNITY_CATEGORY) {
     if (role === 'lecturer') {
       const nip = identity && identity.nip;
@@ -1078,18 +1109,23 @@ function canViewProject(p, role, identity) {
 
 function canApproveProject(p, role, identity) {
   if (!p || role !== 'lecturer') return false;
-  const nip = identity && identity.nip;
-  // Usulan umum tanpa pemilik dapat ditinjau oleh semua dosen; setelah disetujui,
-  // hanya dosen pemilik yang dapat mengelola dokumentasi dan penilaiannya.
-  if (isPublicMarketplaceProject(p)) {
-    if (p.status === 'Diajukan' && !p.ownerNip) return !!nip;
-    if (p.ownerNip) return !!nip && String(p.ownerNip) === String(nip);
-    return !!nip && (String(p.supervisorNip || '') === String(nip)
-      || String(p.creatorNip || '') === String(nip)
-      || (identity.name && (p.supervisor === identity.name || p.creator === identity.name)));
+  const nip = String((identity && identity.nip) || '');
+  // Usulan yang sudah memilih dosen hanya dapat ditinjau oleh dosen tersebut.
+  if (p.status === 'Diajukan' && !p.ownerNip) {
+    const assignedNip = String(p.supervisorNip || '').trim();
+    return !!nip && (!assignedNip || assignedNip === nip);
   }
-  if (p.category !== COURSE_CATEGORY) return true;
-  return !!nip && (p.supervisorNip === nip || p.creatorNip === nip);
+  // Setelah disetujui, hanya dosen pemilik yang dapat mengelola proyek.
+  if (p.ownerNip) return !!nip && String(p.ownerNip) === nip;
+  if (isPublicMarketplaceProject(p)) {
+    return !!nip && (String(p.supervisorNip || '') === nip
+      || String(p.creatorNip || '') === nip
+      || (identity && identity.name && (p.supervisor === identity.name || p.creator === identity.name)));
+  }
+  if (p.category === COURSE_CATEGORY || p.category === COMMUNITY_CATEGORY) {
+    return !!nip && (String(p.supervisorNip || '') === nip || String(p.creatorNip || '') === nip);
+  }
+  return true;
 }
 
 function canGradeProject(p, role, identity) {
@@ -1108,46 +1144,982 @@ function isSupervisingLecturer(p, identity) {
 }
 
 /* ------------------- DATA DUMMY ------------------- */
-/* Fixture data lama dihapus saat migrasi ke Django. Tidak ada akun/proyek demo. */
+const SEED_DUMMY = {
+  "students": [
+    {
+      "nim": "250001",
+      "name": "Aditya Pratama",
+      "kelas": "A",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Rekayasa Perangkat Lunak",
+        "Kecerdasan Buatan",
+        "Jaringan Komputer",
+        "Sistem Informasi",
+        "Informatika Untuk Masyarakat"
+      ]
+    },
+    {
+      "nim": "250002",
+      "name": "Bunga Citra Lestari",
+      "kelas": "A",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Rekayasa Perangkat Lunak",
+        "Kecerdasan Buatan",
+        "Basis Data",
+        "Sistem Informasi"
+      ]
+    },
+    {
+      "nim": "250003",
+      "name": "Dimas Anggara",
+      "kelas": "A",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Rekayasa Perangkat Lunak",
+        "Jaringan Komputer",
+        "Basis Data",
+        "Informatika Untuk Masyarakat"
+      ]
+    },
+    {
+      "nim": "250004",
+      "name": "Eka Putri Wulandari",
+      "kelas": "A",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Kecerdasan Buatan",
+        "Jaringan Komputer",
+        "Sistem Informasi"
+      ]
+    },
+    {
+      "nim": "250005",
+      "name": "Fajar Nugroho",
+      "kelas": "A",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Rekayasa Perangkat Lunak",
+        "Basis Data",
+        "Jaringan Komputer",
+        "Informatika Untuk Masyarakat"
+      ]
+    },
+    {
+      "nim": "250006",
+      "name": "Gita Savitri",
+      "kelas": "B",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Rekayasa Perangkat Lunak",
+        "Kecerdasan Buatan",
+        "Basis Data",
+        "Sistem Informasi"
+      ]
+    },
+    {
+      "nim": "250007",
+      "name": "Hendra Kurniawan",
+      "kelas": "B",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Rekayasa Perangkat Lunak",
+        "Jaringan Komputer",
+        "Basis Data"
+      ]
+    },
+    {
+      "nim": "250008",
+      "name": "Intan Permatasari",
+      "kelas": "B",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Kecerdasan Buatan",
+        "Jaringan Komputer",
+        "Sistem Informasi",
+        "Informatika Untuk Masyarakat"
+      ]
+    },
+    {
+      "nim": "250009",
+      "name": "Joko Santoso",
+      "kelas": "B",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Rekayasa Perangkat Lunak",
+        "Basis Data",
+        "Sistem Informasi",
+        "Informatika Untuk Masyarakat"
+      ]
+    },
+    {
+      "nim": "250010",
+      "name": "Kartika Dewi",
+      "kelas": "B",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Kecerdasan Buatan",
+        "Basis Data",
+        "Jaringan Komputer"
+      ]
+    },
+    {
+      "nim": "250011",
+      "name": "Lukman Hakim",
+      "kelas": "C",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Rekayasa Perangkat Lunak",
+        "Basis Data",
+        "Jaringan & Keamanan Siber",
+        "Informatika Untuk Masyarakat"
+      ]
+    },
+    {
+      "nim": "250012",
+      "name": "Maya Anggraini",
+      "kelas": "C",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Basis Data",
+        "Sistem Informasi",
+        "Jaringan & Keamanan Siber",
+        "Informatika Untuk Masyarakat"
+      ]
+    },
+    {
+      "nim": "250013",
+      "name": "Naufal Ramadhan",
+      "kelas": "C",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Rekayasa Perangkat Lunak",
+        "Jaringan Komputer",
+        "Jaringan & Keamanan Siber"
+      ]
+    },
+    {
+      "nim": "250014",
+      "name": "Olivia Rahma",
+      "kelas": "C",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Kecerdasan Buatan",
+        "Basis Data",
+        "Sistem Informasi",
+        "Jaringan & Keamanan Siber"
+      ]
+    },
+    {
+      "nim": "250015",
+      "name": "Putra Wijaya",
+      "kelas": "C",
+      "angkatan": "2025",
+      "prodi": "S1 Informatika",
+      "mataKuliahDiambil": [
+        "Rekayasa Perangkat Lunak",
+        "Jaringan Komputer",
+        "Sistem Informasi",
+        "Informatika Untuk Masyarakat"
+      ]
+    }
+  ],
+  "lecturers": [
+    {
+      "nip": "198503102010121001",
+      "name": "Dr. Ir. Andi Wijaya, M.Kom.",
+      "email": "andi.wijaya@unmul.ac.id",
+      "mataKuliah": "Jaringan Komputer, Jaringan & Keamanan Siber",
+      "mataKuliahDiampu": [
+        {
+          "course": "Jaringan Komputer",
+          "angkatan": [
+            "2025"
+          ],
+          "kelas": [
+            "A",
+            "B",
+            "C"
+          ]
+        },
+        {
+          "course": "Jaringan & Keamanan Siber",
+          "angkatan": [
+            "2025"
+          ],
+          "kelas": [
+            "C"
+          ]
+        }
+      ],
+      "bidangKeahlian": [
+        "Jaringan Komputer",
+        "Keamanan Siber"
+      ],
+      "pendidikan": [],
+      "publikasi": []
+    },
+    {
+      "nip": "198704152011012002",
+      "name": "Ir. Siti Aminah, M.T.",
+      "email": "siti.aminah@unmul.ac.id",
+      "mataKuliah": "Sistem Informasi, Informatika Untuk Masyarakat",
+      "mataKuliahDiampu": [
+        {
+          "course": "Sistem Informasi",
+          "angkatan": [
+            "2025"
+          ],
+          "kelas": [
+            "A",
+            "B",
+            "C"
+          ]
+        },
+        {
+          "course": "Informatika Untuk Masyarakat",
+          "angkatan": [
+            "2025"
+          ],
+          "kelas": [
+            "B",
+            "C"
+          ]
+        }
+      ],
+      "bidangKeahlian": [
+        "Sistem Informasi",
+        "Analisis Proses Bisnis"
+      ],
+      "pendidikan": [],
+      "publikasi": []
+    },
+    {
+      "nip": "199005202012011003",
+      "name": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "email": "rudi.hartono@unmul.ac.id",
+      "mataKuliah": "Rekayasa Perangkat Lunak, Kecerdasan Buatan, Basis Data, Informatika Untuk Masyarakat",
+      "mataKuliahDiampu": [
+        {
+          "course": "Rekayasa Perangkat Lunak",
+          "angkatan": [
+            "2025"
+          ],
+          "kelas": [
+            "A",
+            "B",
+            "C"
+          ]
+        },
+        {
+          "course": "Kecerdasan Buatan",
+          "angkatan": [
+            "2025"
+          ],
+          "kelas": [
+            "A",
+            "B",
+            "C"
+          ]
+        },
+        {
+          "course": "Basis Data",
+          "angkatan": [
+            "2025"
+          ],
+          "kelas": [
+            "A",
+            "B",
+            "C"
+          ]
+        },
+        {
+          "course": "Informatika Untuk Masyarakat",
+          "angkatan": [
+            "2025"
+          ],
+          "kelas": [
+            "A"
+          ]
+        }
+      ],
+      "bidangKeahlian": [
+        "Rekayasa Perangkat Lunak",
+        "Kecerdasan Buatan",
+        "Basis Data",
+        "Informatika Untuk Masyarakat"
+      ],
+      "pendidikan": [],
+      "publikasi": []
+    }
+  ],
+  "courses": [
+    "Rekayasa Perangkat Lunak",
+    "Kecerdasan Buatan",
+    "Jaringan Komputer",
+    "Sistem Informasi",
+    "Basis Data",
+    "Jaringan & Keamanan Siber",
+    "Informatika Untuk Masyarakat"
+  ],
+  "courseOfferings": [
+    {
+      "id": "MK-ANDI-JK-2025-A",
+      "course": "Jaringan Komputer",
+      "lecturerNip": "198503102010121001",
+      "lecturerName": "Dr. Ir. Andi Wijaya, M.Kom.",
+      "kelas": "A",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-ANDI-JK-2025-B",
+      "course": "Jaringan Komputer",
+      "lecturerNip": "198503102010121001",
+      "lecturerName": "Dr. Ir. Andi Wijaya, M.Kom.",
+      "kelas": "B",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-ANDI-JK-2025-C",
+      "course": "Jaringan Komputer",
+      "lecturerNip": "198503102010121001",
+      "lecturerName": "Dr. Ir. Andi Wijaya, M.Kom.",
+      "kelas": "C",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-ANDI-JKS-2025-C",
+      "course": "Jaringan & Keamanan Siber",
+      "lecturerNip": "198503102010121001",
+      "lecturerName": "Dr. Ir. Andi Wijaya, M.Kom.",
+      "kelas": "C",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-SITI-SI-2025-A",
+      "course": "Sistem Informasi",
+      "lecturerNip": "198704152011012002",
+      "lecturerName": "Ir. Siti Aminah, M.T.",
+      "kelas": "A",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-SITI-SI-2025-B",
+      "course": "Sistem Informasi",
+      "lecturerNip": "198704152011012002",
+      "lecturerName": "Ir. Siti Aminah, M.T.",
+      "kelas": "B",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-SITI-SI-2025-C",
+      "course": "Sistem Informasi",
+      "lecturerNip": "198704152011012002",
+      "lecturerName": "Ir. Siti Aminah, M.T.",
+      "kelas": "C",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-SITI-IUM-2025-B",
+      "course": "Informatika Untuk Masyarakat",
+      "lecturerNip": "198704152011012002",
+      "lecturerName": "Ir. Siti Aminah, M.T.",
+      "kelas": "B",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-SITI-IUM-2025-C",
+      "course": "Informatika Untuk Masyarakat",
+      "lecturerNip": "198704152011012002",
+      "lecturerName": "Ir. Siti Aminah, M.T.",
+      "kelas": "C",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-RUDI-RPL-2025-A",
+      "course": "Rekayasa Perangkat Lunak",
+      "lecturerNip": "199005202012011003",
+      "lecturerName": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "kelas": "A",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-RUDI-RPL-2025-B",
+      "course": "Rekayasa Perangkat Lunak",
+      "lecturerNip": "199005202012011003",
+      "lecturerName": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "kelas": "B",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-RUDI-RPL-2025-C",
+      "course": "Rekayasa Perangkat Lunak",
+      "lecturerNip": "199005202012011003",
+      "lecturerName": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "kelas": "C",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-RUDI-KB-2025-A",
+      "course": "Kecerdasan Buatan",
+      "lecturerNip": "199005202012011003",
+      "lecturerName": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "kelas": "A",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-RUDI-KB-2025-B",
+      "course": "Kecerdasan Buatan",
+      "lecturerNip": "199005202012011003",
+      "lecturerName": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "kelas": "B",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-RUDI-KB-2025-C",
+      "course": "Kecerdasan Buatan",
+      "lecturerNip": "199005202012011003",
+      "lecturerName": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "kelas": "C",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-RUDI-BD-2025-A",
+      "course": "Basis Data",
+      "lecturerNip": "199005202012011003",
+      "lecturerName": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "kelas": "A",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-RUDI-BD-2025-B",
+      "course": "Basis Data",
+      "lecturerNip": "199005202012011003",
+      "lecturerName": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "kelas": "B",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-RUDI-BD-2025-C",
+      "course": "Basis Data",
+      "lecturerNip": "199005202012011003",
+      "lecturerName": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "kelas": "C",
+      "angkatan": "2025"
+    },
+    {
+      "id": "MK-RUDI-IUM-2025-A",
+      "course": "Informatika Untuk Masyarakat",
+      "lecturerNip": "199005202012011003",
+      "lecturerName": "Dr. Rudi Hartono, S.T., M.Eng.",
+      "kelas": "A",
+      "angkatan": "2025"
+    }
+  ],
+  "projects": [
+    {
+        "id": "PRJ-2026-017",
+        "title": "Usulan Proyek Umum — Aplikasi Peta UMKM Samarinda",
+        "category": "Kompetisi",
+        "course": "",
+        "creator": "Aditya Pratama",
+        "creatorNim": "250001",
+        "creatorRole": "Ketua Tim Mahasiswa",
+        "studentCreated": true,
+        "submittedBy": "Aditya Pratama (250001)",
+        "submittedAt": "20 Okt 2026",
+        "supervisor": "Dr. Rudi Hartono, S.T., M.Eng.",
+        "supervisorNip": "199005202012011003",
+        "department": "S1 Informatika",
+        "mitra": "Pelaku UMKM Samarinda",
+        "lokasi": "Samarinda, Kalimantan Timur",
+        "period": "Nov 2026 – Feb 2027",
+        "membersNeeded": 3,
+        "isGroup": false,
+        "status": "Diajukan",
+        "description": "Usulan aplikasi peta digital yang membantu masyarakat menemukan UMKM lokal beserta katalog produk dan informasi kontak.",
+        "requirements": "Mahasiswa yang tertarik pada pengembangan aplikasi web, pemetaan, dan desain antarmuka.",
+        "members": [
+            {
+                "nim": "250001",
+                "role": "Ketua Tim",
+                "approved": false
+            }
+        ],
+        "applicants": [],
+        "milestones": {
+            "proposal": {
+                "status": "Menunggu Verifikasi",
+                "fileName": "",
+                "submittedAt": "20 Okt 2026",
+                "note": "Usulan proyek umum yang menunggu peninjauan dosen."
+            }
+        },
+        "guidance": []
+    },
+    {
+        "id": "PRJ-2026-018",
+        "title": "Usulan IUM — Literasi Keamanan Digital untuk Warga",
+        "category": "Informatika Untuk Masyarakat",
+        "course": "Informatika Untuk Masyarakat",
+        "creator": "Aditya Pratama",
+        "creatorNim": "250001",
+        "creatorRole": "Ketua Tim Mahasiswa",
+        "studentCreated": true,
+        "submittedBy": "Aditya Pratama (250001)",
+        "submittedAt": "20 Okt 2026",
+        "supervisor": "Dr. Rudi Hartono, S.T., M.Eng.",
+        "supervisorNip": "199005202012011003",
+        "department": "S1 Informatika",
+        "mitra": "Kelurahan setempat",
+        "lokasi": "Samarinda, Kalimantan Timur",
+        "period": "Nov 2026 – Jan 2027",
+        "membersNeeded": 3,
+        "isGroup": false,
+        "status": "Diajukan",
+        "description": "Usulan pelatihan keamanan akun, privasi, dan kewaspadaan terhadap penipuan digital untuk warga.",
+        "requirements": "Mahasiswa yang mengambil Informatika Untuk Masyarakat dan bersedia mengikuti kegiatan lapangan.",
+        "members": [
+            {
+                "nim": "250001",
+                "role": "Ketua Tim",
+                "approved": false
+            }
+        ],
+        "applicants": [],
+        "milestones": {
+            "proposal": {
+                "status": "Menunggu Verifikasi",
+                "fileName": "",
+                "submittedAt": "20 Okt 2026",
+                "note": "Usulan Informatika Untuk Masyarakat yang menunggu peninjauan dosen."
+            }
+        },
+        "guidance": []
+    },
+    {
+        "id": "PRJ-2026-019",
+        "title": "Usulan Proyek Mata Kuliah — Dashboard Analitik Akademik",
+        "category": "Proyek Mata Kuliah",
+        "course": "Rekayasa Perangkat Lunak",
+        "creator": "Aditya Pratama",
+        "creatorNim": "250001",
+        "creatorRole": "Mahasiswa Pengusul",
+        "studentCreated": true,
+        "submittedBy": "Aditya Pratama (250001)",
+        "submittedAt": "20 Okt 2026",
+        "supervisor": "Dr. Rudi Hartono, S.T., M.Eng.",
+        "supervisorNip": "199005202012011003",
+        "department": "S1 Informatika",
+        "mitra": "Program Studi S1 Informatika",
+        "lokasi": "Kampus Gunung Kelua",
+        "period": "Nov 2026 – Des 2026",
+        "membersNeeded": 1,
+        "isGroup": false,
+        "status": "Diajukan",
+        "angkatan": "2025",
+        "kelas": [
+            "A"
+        ],
+        "description": "Usulan tugas mata kuliah Rekayasa Perangkat Lunak berupa dashboard ringkas untuk memantau tren data akademik.",
+        "requirements": "Mahasiswa angkatan 2025 kelas A yang mengambil Rekayasa Perangkat Lunak.",
+        "members": [
+            {
+                "nim": "250001",
+                "role": "Pengusul",
+                "approved": false
+            }
+        ],
+        "applicants": [],
+        "milestones": {
+            "proposal": {
+                "status": "Menunggu Verifikasi",
+                "fileName": "",
+                "submittedAt": "20 Okt 2026",
+                "note": "Usulan Proyek Mata Kuliah yang menunggu peninjauan dosen."
+            }
+        },
+        "guidance": []
+    },
+    {
+        "id": "PRJ-2026-020",
+        "title": "Proyek Umum Dosen — Portal Kolaborasi Teknologi Lokal",
+        "category": "Kompetisi",
+        "course": "",
+        "creator": "Dr. Rudi Hartono, S.T., M.Eng.",
+        "creatorNip": "199005202012011003",
+        "creatorRole": "Dosen",
+        "ownerNip": "199005202012011003",
+        "supervisor": "Dr. Rudi Hartono, S.T., M.Eng.",
+        "supervisorNip": "199005202012011003",
+        "department": "S1 Informatika",
+        "mitra": "Komunitas teknologi lokal",
+        "lokasi": "Samarinda",
+        "period": "Nov 2026 – Mar 2027",
+        "membersNeeded": 4,
+        "isGroup": false,
+        "status": "Open",
+        "description": "Pengembangan portal untuk menghubungkan komunitas teknologi lokal, mentor, dan mahasiswa dalam kegiatan kolaboratif.",
+        "requirements": "Mahasiswa yang berminat pada pengembangan web, desain UI/UX, atau manajemen data.",
+        "members": [
+            {
+                "nim": "250001",
+                "name": "Aditya Pratama",
+                "prodi": "S1 Informatika",
+                "role": "Anggota Proyek",
+                "approved": true
+            }
+        ],
+        "applicants": [],
+        "milestones": {
+            "proposal": {
+                "status": "Disetujui",
+                "fileName": "",
+                "submittedAt": "18 Okt 2026",
+                "verifiedBy": "Dr. Rudi Hartono, S.T., M.Eng.",
+                "verifiedAt": "19 Okt 2026",
+                "note": "Rencana proyek umum dosen."
+            }
+        },
+        "guidance": [],
+        "ownerName": "Dr. Rudi Hartono, S.T., M.Eng."
+    },
+    {
+        "id": "PRJ-2026-021",
+        "title": "Informatika Untuk Masyarakat — Pendampingan UMKM Digital",
+        "category": "Informatika Untuk Masyarakat",
+        "course": "Informatika Untuk Masyarakat",
+        "creator": "Dr. Rudi Hartono, S.T., M.Eng.",
+        "creatorNip": "199005202012011003",
+        "creatorRole": "Dosen Pengampu",
+        "ownerNip": "199005202012011003",
+        "supervisor": "Dr. Rudi Hartono, S.T., M.Eng.",
+        "supervisorNip": "199005202012011003",
+        "department": "S1 Informatika",
+        "mitra": "Pelaku UMKM Samarinda",
+        "lokasi": "Samarinda",
+        "period": "Nov 2026 – Feb 2027",
+        "membersNeeded": 4,
+        "isGroup": false,
+        "status": "Active",
+        "description": "Pendampingan UMKM untuk membuat katalog digital, mengelola akun bisnis, dan menerapkan praktik keamanan digital.",
+        "requirements": "Mahasiswa yang mengambil Informatika Untuk Masyarakat dan bersedia melakukan pendampingan lapangan.",
+        "members": [
+            {
+                "nim": "250001",
+                "name": "Aditya Pratama",
+                "prodi": "S1 Informatika",
+                "role": "Anggota Proyek",
+                "approved": true
+            }
+        ],
+        "applicants": [],
+        "milestones": {
+            "proposal": {
+                "status": "Disetujui",
+                "fileName": "",
+                "submittedAt": "18 Okt 2026",
+                "verifiedBy": "Dr. Rudi Hartono, S.T., M.Eng.",
+                "verifiedAt": "19 Okt 2026",
+                "note": "Rencana kegiatan pengabdian."
+            }
+        },
+        "guidance": [],
+        "ownerName": "Dr. Rudi Hartono, S.T., M.Eng."
+    },
+    {
+        "id": "PRJ-2026-022",
+        "title": "Proyek Mata Kuliah — Aplikasi Inventaris Laboratorium",
+        "category": "Proyek Mata Kuliah",
+        "course": "Rekayasa Perangkat Lunak",
+        "creator": "Dr. Rudi Hartono, S.T., M.Eng.",
+        "creatorNip": "199005202012011003",
+        "creatorRole": "Dosen Pengampu",
+        "ownerNip": "199005202012011003",
+        "supervisor": "Dr. Rudi Hartono, S.T., M.Eng.",
+        "supervisorNip": "199005202012011003",
+        "department": "S1 Informatika",
+        "mitra": "Laboratorium Informatika",
+        "lokasi": "Kampus Gunung Kelua",
+        "period": "Nov 2026 – Des 2026",
+        "membersNeeded": 3,
+        "isGroup": false,
+        "status": "Active",
+        "angkatan": "2025",
+        "kelas": [
+            "A",
+            "B",
+            "C"
+        ],
+        "description": "Tugas proyek pengembangan aplikasi inventaris laboratorium dengan fitur pencatatan barang, peminjaman, dan laporan.",
+        "requirements": "Mahasiswa angkatan 2025 kelas A, B, atau C yang mengambil Rekayasa Perangkat Lunak.",
+        "members": [
+            {
+                "nim": "250001",
+                "name": "Aditya Pratama",
+                "prodi": "S1 Informatika",
+                "role": "Anggota Proyek",
+                "approved": true
+            }
+        ],
+        "applicants": [],
+        "milestones": {
+            "proposal": {
+                "status": "Disetujui",
+                "fileName": "",
+                "submittedAt": "18 Okt 2026",
+                "verifiedBy": "Dr. Rudi Hartono, S.T., M.Eng.",
+                "verifiedAt": "19 Okt 2026",
+                "note": "Tugas proyek mata kuliah yang ditetapkan dosen."
+            }
+        },
+        "guidance": [],
+        "ownerName": "Dr. Rudi Hartono, S.T., M.Eng."
+    }
+]
+};
+// Hanya enam fixture proyek yang memang diperlukan untuk simulasi dua arah:
+// tiga usulan Aditya dan tiga proyek yang dibuat Dr. Rudi.
+const DEMO_INTERACTION_PROJECT_IDS = new Set([
+  'PRJ-2026-017', 'PRJ-2026-018', 'PRJ-2026-019',
+  'PRJ-2026-020', 'PRJ-2026-021', 'PRJ-2026-022'
+]);
+const SEED_AVATARS = ['1535713875002-d1d0cf377fde','1494790108377-be9c29b29330','1580489944761-15a19d654956','1570295999919-56ceb5ecca61','1633332755192-727a05c4013d','1544725176-7c40e5a71c5e','1500648767791-00dcc994a43e','1487412720507-e7ab37603c6f','1560250097-0b93528c311a','1472099645785-5658abf4ff4e'];
+const seedAvatar = i => `https://images.unsplash.com/photo-${SEED_AVATARS[i % SEED_AVATARS.length]}?auto=format&fit=crop&w=150&q=80`;
+const seedStudent = nim => { const x = SEED_DUMMY.students.find(z => z.nim === String(nim)); return { nim: x.nim, name: x.name, prodi: x.prodi }; };
+function hydrateSeedProject(p) {
+  const mem = m => Object.assign(seedStudent(m.nim), { role: m.role || 'Anggota', approved: m.approved !== false },
+    m.proposedBy ? { proposedBy: m.proposedBy, proposedByName: m.proposedByName || '' } : {});
+  const q = Object.assign({}, p);
+  q.isGroup = !!p.isGroup;
+  q.members = (p.members || []).map(mem);
+  q.applicants = (p.applicants || []).map(a => Object.assign(seedStudent(a.nim), { prodi: seedStudent(a.nim).prodi }, a));
+  q.groups = (p.groups || []).map(g => ({ id: g.id, name: g.name, members: (g.members || []).map(mem), milestones: buildMilestones(g.milestones || {}), guidance: g.guidance || [], ...(g.grade ? { grade: g.grade } : {}) }));
+  q.milestones = q.isGroup ? [] : buildMilestones(p.milestones || {});
+  q.guidance = p.guidance || [];
+  if (p.grade) q.grade = p.grade;
+  return q;
+}
+
+/* Dosen demo (login) mengampu beberapa mata kuliah berbeda untuk angkatan 2025 */
+const DEMO_LECTURER_COURSES = [
+  { course: 'Rekayasa Perangkat Lunak', angkatan: ['2025'], kelas: ['A', 'B', 'C'] },
+  { course: 'Kecerdasan Buatan', angkatan: ['2025'], kelas: ['A', 'B', 'C'] },
+  { course: 'Basis Data', angkatan: ['2025'], kelas: ['A', 'B', 'C'] },
+  { course: 'Informatika Untuk Masyarakat', angkatan: ['2025'], kelas: ['A'] }
+];
+
+/* ---------------------------------- DATA ---------------------------------- */
 const SEED = {
   student: {
-    name: 'Mahasiswa', nim: '', prodi: 'S1 Informatika', fakultas: 'Fakultas Teknik',
-    email: '', avatar: '', angkatan: '', kelas: '', semester: '-', gpa: 0,
-    phone: '', bio: '', skills: [], targetMexs: 1000,
+    nim: '250001',
+    name: 'Aditya Pratama',
+    prodi: 'S1 Informatika',
+    fakultas: 'Fakultas Teknik',
+    angkatan: '2025',
+    kelas: 'A',
+    semester: semesterForCohort('2025'),
+    email: '250001@mhs.unmul.ac.id',
+    phone: '',
+    avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80',
+    bio: 'Mahasiswa angkatan 2025 Program Studi S1 Informatika.',
+    skills: [],
+    gpa: 3.50,
+    targetMexs: 1000,
   },
+
   lecturer: {
-    nip: '', name: 'Dosen', jabatan: '', prodi: 'S1 Informatika', email: '', avatar: '',
-    nidn: '', gelar: '', jabatanFungsional: '', bidangKeahlian: [], mataKuliahDiampu: [],
-    pendidikan: [], publikasi: [],
+    nip: '199005202012011003',
+    name: 'Dr. Rudi Hartono, S.T., M.Eng.',
+    prodi: 'S1 Informatika',
+    email: 'rudi.hartono@unmul.ac.id',
+    avatar: 'https://images.unsplash.com/photo-1560250097-0b93528c311a?auto=format&fit=crop&w=150&q=80',
+    jabatanFungsional: '',
+    bidangKeahlian: ['Rekayasa Perangkat Lunak','Kecerdasan Buatan','Basis Data','Informatika Untuk Masyarakat'],
+    mataKuliahDiampu: JSON.parse(JSON.stringify(DEMO_LECTURER_COURSES)),
+    pendidikan: [],
+    publikasi: []
   },
+
   admin: {
-    nip: '', name: 'Administrator', jabatan: 'Administrator Program Studi',
-    prodi: 'S1 Informatika', email: '', avatar: '',
+    nip: '198501012010121001',
+    name: 'Rina Kartika Sari, S.Kom., M.Cs.',
+    jabatan: 'Administrator Program Studi',
+    prodi: 'S1 Informatika',
+    email: 'admin.informatika@unmul.ac.id',
+    avatar: 'https://images.unsplash.com/photo-1573497019940-1c28c88b4f3e?auto=format&fit=crop&w=150&q=80'
   },
-  users: [],
-  announcements: [],
+
+  users: [
+    { id:'u-3', username:'admin', password:'password123', role:'admin', name:'Rina Kartika Sari, S.Kom., M.Cs.', nip:'198501012010121001', prodi:'S1 Informatika', email:'admin.informatika@unmul.ac.id', avatar:'https://images.unsplash.com/photo-1573497019940-1c28c88b4f3e?auto=format&fit=crop&w=150&q=80', active:true, createdAt:'01 Agu 2026' },
+    ...SEED_DUMMY.students.map((x, i) => ({
+      id: `u-25${i + 1}`, username: x.nim, password: 'password123', role: 'student',
+      name: x.name, nim: x.nim, kelas: x.kelas, prodi: x.prodi, angkatan: x.angkatan,
+      mataKuliahDiambil: x.mataKuliahDiambil || [],
+      email: `${x.nim}@mhs.unmul.ac.id`, avatar: seedAvatar(i), active: true, createdAt: '01 Sep 2026'
+    })),
+    ...SEED_DUMMY.lecturers.map((d, i) => ({
+      id: `u-d${i + 1}`, username: d.nip, password: 'password123', role: 'lecturer',
+      name: d.name, nip: d.nip, mataKuliah: d.mataKuliah, prodi: 'S1 Informatika', email: d.email,
+      avatar: seedAvatar(i + 6), active: true, createdAt: '01 Sep 2026',
+      mataKuliahDiampu: d.mataKuliahDiampu || [{ course: d.mataKuliah, angkatan: ['2025'], kelas: ['A'] }]
+    }))
+  ],
+
+  announcements: [
+    { id:'an-1', title:'Pendaftaran Hibah Penelitian Mahasiswa', body:'Batas akhir pengumpulan proposal penelitian kolaborasi dosen–mahasiswa: 30 Oktober 2026.', date:'18 Sep 2026', audience:'all'},
+    { id:'an-2', title:'Validasi SKPI Semester Ganjil', body:'Pastikan seluruh sertifikat prestasi telah diunggah dan disetujui dosen sebelum 10 Oktober 2026.', date:'10 Okt 2026', audience:'student'},
+    { id:'an-3', title:'Pendaftaran Asisten Laboratorium', body:'Rekrutmen asisten laboratorium semester ganjil dibuka hingga 28 September 2026.', date:'15 Sep 2026', audience:'all',}
+  ],
+
   masterData: {
     projectCategories: [...DEFAULT_PROJECT_CATEGORIES],
-    courses: ['Rekayasa Perangkat Lunak', 'Jaringan Komputer', 'Basis Data', 'Kecerdasan Buatan',
-      'Jaringan & Keamanan Siber', 'Sistem Informasi', 'Kerja Praktik / Magang',
-      'Skripsi / Tugas Akhir', 'KKN / Informatika untuk Masyarakat'],
+    courses: ['Rekayasa Perangkat Lunak', 'Jaringan Komputer', 'Basis Data', 'Kecerdasan Buatan', 'Jaringan & Keamanan Siber', 'Sistem Informasi', 'Kerja Praktik / Magang', 'Skripsi / Tugas Akhir', 'Informatika Untuk Masyarakat'],
     classes: ['A', 'B', 'C'],
-    courseOfferings: [],
-    achievementCategories: [],
-    mexsThreshold: 1000,
+    courseOfferings: SEED_DUMMY.courseOfferings,
+    achievementCategories: [
+      { name:'Juara 1–3 Kompetisi – Internasional', points:1500 },
+      { name:'Juara 1–3 Kompetisi – Nasional', points:1000 },
+      { name:'Juara 1–3 Kompetisi – Regional', points:750 },
+      { name:'Juara 1–3 Kompetisi – Institusi', points:500 },
+      { name:'Juara 1–3 Kompetisi – Fakultas', points:300 },
+      { name:'Finalis Kompetisi – Internasional', points:1000 },
+      { name:'Finalis Kompetisi – Nasional', points:750 },
+      { name:'Finalis Kompetisi – Regional', points:500 },
+      { name:'Finalis Kompetisi – Institusi', points:300 },
+      { name:'Peserta Terpilih Kompetisi – Internasional', points:750 },
+      { name:'Peserta Terpilih Kompetisi – Nasional', points:600 },
+      { name:'Peserta Terpilih Kompetisi – Regional', points:400 },
+      { name:'Peserta Terpilih Kompetisi – Institusi', points:200 },
+      { name:'Pembicara Forum Ilmiah – Internasional', points:1000 },
+      { name:'Pembicara Forum Ilmiah – Nasional', points:750 },
+      { name:'Pembicara Forum Ilmiah – Regional', points:500 },
+      { name:'Pembicara Forum Ilmiah – Institusi', points:300 },
+      { name:'Partisipan Forum Ilmiah – Internasional', points:300 },
+      { name:'Partisipan Forum Ilmiah – Nasional', points:200 },
+      { name:'Partisipan Forum Ilmiah – Regional', points:150 },
+      { name:'Partisipan Forum Ilmiah – Institusi', points:100 },
+      { name:'Peserta Kegiatan Sosial – Internasional', points:750 },
+      { name:'Peserta Kegiatan Sosial – Nasional', points:500 },
+      { name:'Peserta Kegiatan Sosial – Regional', points:400 },
+      { name:'Peserta Kegiatan Sosial – Institusi', points:300 },
+      { name:'Organisasi Institusi – Ketua', points:550 },
+      { name:'Organisasi Institusi – Wakil Ketua/Sekretaris/Bendahara', points:500 },
+      { name:'Organisasi Institusi – Pengurus', points:450 },
+      { name:'Organisasi Institusi – Staf', points:200 },
+      { name:'Organisasi Fakultas – Ketua', points:550 },
+      { name:'Organisasi Fakultas – Wakil Ketua/Sekretaris/Bendahara', points:500 },
+      { name:'Organisasi Fakultas – Pengurus', points:350 },
+      { name:'Organisasi Fakultas – Staf', points:150 },
+      { name:'Organisasi Jurusan/Prodi – Ketua', points:450 },
+      { name:'Organisasi Jurusan/Prodi – Wakil Ketua/Sekretaris/Bendahara', points:400 },
+      { name:'Organisasi Jurusan/Prodi – Pengurus', points:300 },
+      { name:'Organisasi Jurusan/Prodi – Staf', points:100 },
+      { name:'Organisasi Org. Keagamaan – Ketua', points:500 },
+      { name:'Organisasi Org. Keagamaan – Wakil Ketua/Sekretaris/Bendahara', points:450 },
+      { name:'Organisasi Org. Keagamaan – Pengurus', points:350 },
+      { name:'Organisasi Org. Keagamaan – Staf', points:100 },
+      { name:'Panitia Kemahasiswaan – Nasional', points:350 },
+      { name:'Panitia Kemahasiswaan – Regional', points:300 },
+      { name:'Panitia Kemahasiswaan – Institusi', points:250 },
+      { name:'Panitia Kemahasiswaan – Fakultas', points:200 },
+      { name:'Panitia Kemahasiswaan – Jurusan/Prodi', points:150 },
+      { name:'LKM – Peserta', points:200 },
+      { name:'LKM – Pelatihan Pemandu', points:300 },
+      { name:'LKM – Pemandu', points:250 },
+      { name:'Pengembangan Karakter & Keterampilan – Peserta', points:200 }
+    ],
+    mexsThreshold: 1000
   },
+
   skpiFinalizations: [],
-  projects: [],
+
+  projects: [
+    ...SEED_DUMMY.projects
+      .filter(project => DEMO_INTERACTION_PROJECT_IDS.has(String(project.id)))
+      .map(hydrateSeedProject)
+  ],
+
   achievements: [],
-  portfolios: [],
-  invitations: [],
-  talentPool: [],
-  notifications: [],
-  studentProfiles: {},
-  studentProfile: { phone: '', bio: '', skills: [] },
+
+  portfolios: [
+    { id:'p-1', title:'Sistem Informasi Akademik & E-Learning Kampus', category:'Web Application',
+      link:'https://github.com/rizki/e-learning-unmul',
+      desc:'Membangun platform e-learning dengan fitur live streaming kuis dan penugasan kolaboratif.' },
+    { id:'p-2', title:'Deteksi Penyakit Tanaman Sawit Berbasis Deep Learning', category:'Artificial Intelligence',
+      link:'https://github.com/rizki/sawit-ai',
+      desc:'Implementasi Convolutional Neural Network (CNN) dengan TensorFlow untuk mendeteksi penyakit daun kelapa sawit.' }
+  ],
+
+  invitations: [
+    { id:'inv-1', sender:'Dr. Rudi Hartono, S.T., M.Eng.', role:'Dosen Pembimbing',
+      projectId:'PRJ-2026-001', projectTitle:'Sistem Monitoring Smart Campus Berbasis IoT',
+      message:'Halo Ahmad Rizki, melihat portofolio Anda yang kuat di React dan Node.js, saya mengundang Anda bergabung sebagai Lead Developer pada proyek hibah ini.',
+      date:'18 Sep 2026', status:'Menunggu Respon' }
+  ],
+
+  talentPool: [
+    { nim:'2110512001', name:'Ahmad Rizki Pratama', prodi:'S1 Informatika', angkatan:'2021', kelas:'-', gpa:3.85,
+      skills:['React.js','Node.js','Python','Tailwind','Docker'], portfolioCount:2, mexs:3450,
+      avatar:'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80',
+      email:'ahmad.rizki@mhs.unmul.ac.id' },
+    { nim:'2110512015', name:'Siti Rahmawati', prodi:'S1 Informatika', angkatan:'2021', kelas:'-', gpa:3.92,
+      skills:['UI/UX','Figma','Flutter','React Native'], portfolioCount:2, mexs:110,
+      avatar:'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=150&q=80',
+      email:'siti.rahmawati@mhs.unmul.ac.id' },
+    { nim:'2110505022', name:'Budi Santoso', prodi:'S1 Sistem Informasi', angkatan:'2022', kelas:'-', gpa:3.75,
+      skills:['Data Analysis','Python','SQL','Tableau','Excel'], portfolioCount:2, mexs:95,
+      avatar:'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?auto=format&fit=crop&w=150&q=80',
+      email:'budi.santoso@mhs.unmul.ac.id' },
+    { nim:'2110512040', name:'Dewi Lestari', prodi:'S1 Informatika', angkatan:'2022', kelas:'-', gpa:3.88,
+      skills:['Cyber Security','Linux','Networking','Python'], portfolioCount:2, mexs:130,
+      avatar:'https://images.unsplash.com/photo-1580489944761-15a19d654956?auto=format&fit=crop&w=150&q=80',
+      email:'dewi.lestari@mhs.unmul.ac.id' },
+    { nim:'2110512011', name:'Rizky Ananda', prodi:'S1 Informatika', angkatan:'2023', kelas:'-', gpa:3.70,
+      skills:['Java','Spring Boot','MySQL'], portfolioCount:1, mexs:60,
+      avatar:'https://images.unsplash.com/photo-1633332755192-727a05c4013d?auto=format&fit=crop&w=150&q=80',
+      email:'rizky.ananda@mhs.unmul.ac.id' },
+    { nim:'2110512012', name:'Putri Handayani', prodi:'S1 Informatika', angkatan:'2023', kelas:'-', gpa:3.80,
+      skills:['Flutter','Kotlin','Figma'], portfolioCount:1, mexs:75,
+      avatar:'https://images.unsplash.com/photo-1544725176-7c40e5a71c5e?auto=format&fit=crop&w=150&q=80',
+      email:'putri.handayani@mhs.unmul.ac.id' },
+    { nim:'2110512013', name:'Rangga Wijaya', prodi:'S1 Informatika', angkatan:'2023', kelas:'-', gpa:3.65,
+      skills:['React','Tailwind','Node.js'], portfolioCount:1, mexs:55,
+      avatar:'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=150&q=80',
+      email:'rangga.wijaya@mhs.unmul.ac.id' },
+    { nim:'2110512014', name:'Nadia Salsabila', prodi:'S1 Informatika', angkatan:'2023', kelas:'-', gpa:3.90,
+      skills:['Python','Data Science','Pandas'], portfolioCount:1, mexs:85,
+      avatar:'https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?auto=format&fit=crop&w=150&q=80',
+      email:'nadia.salsabila@mhs.unmul.ac.id' }
+  ],
+
+  notifications: [
+    { id:'n-1', title:'Dokumen menunggu verifikasi', body:'Laporan Kemajuan minggu 1–6 proyek IUM Desa Pampang telah diunggah.', time:'22 Sep 2026', read:false },
+    { id:'n-2', title:'Dokumen perlu revisi', body:'Dokumentasi Lapangan minggu ke-3 diminta revisi oleh dosen pembimbing.', time:'21 Sep 2026', read:false },
+    { id:'n-3', title:'Undangan kolaborasi baru', body:'Anda diundang sebagai Lead Developer pada proyek Smart Campus IoT.', time:'18 Sep 2026', read:true }
+  ]
 };
 
 /* --------------------------------- STATE ---------------------------------- */
+const STORAGE_KEY = 'kreasi_unmul_v18';
+
+// Antrean ini menjaga urutan penyimpanan agar perubahan yang lebih baru tidak tertimpa permintaan lama.
+let pendingServerSave = Promise.resolve();
 let db = null;
 let state = {
   currentView: 'landing',
@@ -1209,10 +2181,234 @@ function normalizeProject(p) {
   return p;
 }
 
-function loadDB(serverData = null) {
+/* Pastikan fixture demo memperlihatkan alur dua arah antara Aditya (mahasiswa 1A)
+   dan Dr. Rudi Hartono. Migrasi versi 2 memperbarui data browser dari versi lama. */
+function ensureDemoInteractionFixtures() {
+  if (!db || Number(db.demoInteractionFixtureVersion || 0) >= 4) return;
+  const student = SEED_DUMMY.students.find(x => String(x.nim) === '250001');
+  const lecturer = { nip:'199005202012011003', name:'Dr. Rudi Hartono, S.T., M.Eng.' };
+  if (!student) return;
+  const proposalIds = ['PRJ-2026-017','PRJ-2026-018','PRJ-2026-019'];
+  const lecturerProjectIds = ['PRJ-2026-020','PRJ-2026-021','PRJ-2026-022'];
+  const ensureProject = id => {
+    let project = (db.projects || []).find(x => String(x.id) === id);
+    if (!project) {
+      const template = (SEED.projects || []).find(x => String(x.id) === id);
+      if (template) {
+        project = JSON.parse(JSON.stringify(template));
+        db.projects.push(project);
+      }
+    }
+    return project || null;
+  };
+  proposalIds.forEach(id => {
+    const project = ensureProject(id);
+    if (!project) return;
+    project.category = id === 'PRJ-2026-017' ? 'Kompetisi'
+      : id === 'PRJ-2026-018' ? COMMUNITY_CATEGORY : COURSE_CATEGORY;
+    if (id === 'PRJ-2026-017') project.course = '';
+    if (id === 'PRJ-2026-018') project.course = COMMUNITY_CATEGORY;
+    if (id === 'PRJ-2026-019') project.course = 'Rekayasa Perangkat Lunak';
+    project.creator = student.name;
+    project.creatorNim = student.nim;
+    project.creatorRole = id === 'PRJ-2026-019' ? 'Mahasiswa Pengusul' : 'Ketua Tim Mahasiswa';
+    project.studentCreated = true;
+    project.submittedBy = `${student.name} (${student.nim})`;
+    project.supervisor = lecturer.name;
+    project.supervisorNip = lecturer.nip;
+    project.status = 'Diajukan';
+    delete project.ownerNip; delete project.ownerName; delete project.ownedAt;
+    project.members = [{ nim:student.nim, name:student.name, prodi:student.prodi, role:id === 'PRJ-2026-019' ? 'Pengusul' : 'Ketua Tim', approved:false }];
+    project.applicants = Array.isArray(project.applicants) ? project.applicants : [];
+  });
+  lecturerProjectIds.forEach((id, index) => {
+    const project = ensureProject(id);
+    if (!project) return;
+    project.category = index === 0 ? 'Kompetisi' : index === 1 ? COMMUNITY_CATEGORY : COURSE_CATEGORY;
+    project.course = index === 0 ? '' : index === 1 ? COMMUNITY_CATEGORY : 'Rekayasa Perangkat Lunak';
+    project.creator = lecturer.name;
+    project.creatorNip = lecturer.nip;
+    delete project.creatorNim;
+    project.creatorRole = index === 0 ? 'Dosen' : 'Dosen Pengampu';
+    project.ownerNip = lecturer.nip;
+    project.ownerName = lecturer.name;
+    project.supervisor = lecturer.name;
+    project.supervisorNip = lecturer.nip;
+    project.status = index === 0 ? 'Open' : 'Active';
+    project.isGroup = false;
+    project.members = Array.isArray(project.members) ? project.members : [];
+    const existingMember = project.members.find(m => String(m.nim) === String(student.nim));
+    if (existingMember) {
+      Object.assign(existingMember, { name:student.name, prodi:student.prodi, role:'Anggota Proyek', approved:true });
+    } else {
+      project.members.push({ nim:student.nim, name:student.name, prodi:student.prodi, role:'Anggota Proyek', approved:true });
+    }
+    project.applicants = Array.isArray(project.applicants) ? project.applicants : [];
+  });
+  db.demoInteractionFixtureVersion = 4;
+}
+
+/* Talent Pool harus berisi satu rekam talenta untuk setiap akun mahasiswa aktif,
+   termasuk akun demo angkatan 2025 yang tidak ada di seed talentPool versi lama. */
+function ensureTalentPoolForActiveStudents() {
+  if (!db) return;
+  if (!Array.isArray(db.talentPool)) db.talentPool = [];
+  const students = (db.users || []).filter(u => u && u.role === 'student' && u.active && u.nim);
+  students.forEach((u, index) => {
+    const nim = String(u.nim);
+    const dummy = SEED_DUMMY.students.find(x => String(x.nim) === nim);
+    let talent = db.talentPool.find(t => String(t.nim) === nim);
+    const seededSkills = dummy
+      ? (dummy.mataKuliahDiambil || []).filter(c => !isCommunityCourseName(c)).slice(0, 4)
+      : [];
+    if (!talent) {
+      talent = {
+        nim, name:u.name || nim, prodi:u.prodi || 'S1 Informatika',
+        angkatan:String(u.angkatan || ''), kelas:String(u.kelas || '-'),
+        gpa:dummy ? Number((3.25 + (index % 7) * 0.1).toFixed(2)) : 3.5,
+        skills:seededSkills, portfolioCount:0, mexs:0, mexsBase:0,
+        avatar:u.avatar || seedAvatar(index), email:u.email || '',
+        semester:semesterForCohort(u.angkatan)
+      };
+      db.talentPool.push(talent);
+    }
+    talent.nim = nim;
+    talent.name = u.name || talent.name || nim;
+    talent.prodi = u.prodi || talent.prodi || 'S1 Informatika';
+    talent.angkatan = String(u.angkatan || talent.angkatan || '');
+    talent.kelas = String(u.kelas || talent.kelas || '-');
+    talent.email = u.email || talent.email || '';
+    talent.avatar = u.avatar || talent.avatar || seedAvatar(index);
+    if (typeof talent.gpa !== 'number' || !Number.isFinite(talent.gpa)) {
+      talent.gpa = dummy ? Number((3.25 + (index % 7) * 0.1).toFixed(2)) : 3.5;
+    }
+    if (!Array.isArray(talent.skills) || !talent.skills.length) talent.skills = seededSkills;
+    if (typeof talent.portfolioCount !== 'number' || !Number.isFinite(talent.portfolioCount)) talent.portfolioCount = 0;
+    if (typeof talent.mexs !== 'number' || !Number.isFinite(talent.mexs)) talent.mexs = 0;
+    if (typeof talent.mexsBase !== 'number' || !Number.isFinite(talent.mexsBase)) talent.mexsBase = talent.mexs;
+    talent.semester = semesterForCohort(talent.angkatan);
+  });
+}
+
+/*
+ * Migrasi roster demo satu kali.
+ * Baris akun disusun dengan field yang sama seperti saveNewUser() pada fitur Admin,
+ * lalu disimpan ke db.users/localStorage dan menjadi sumber data bagi login, daftar akun,
+ * profil dosen, penugasan mata kuliah, dan Talent Pool.
+ */
+function ensureCanonicalDemoAccounts() {
+  if (!db || Number(db.demoRosterMigrationVersion || 0) >= 1) return false;
+  const previousUsers = Array.isArray(db.users) ? db.users : [];
+  const previousAdmin = previousUsers.find(u => u && u.role === 'admin');
+  const adminTemplate = (SEED.users || []).find(u => u.role === 'admin') || {
+    id:'u-3', username:'admin', password:'password123', role:'admin',
+    name:SEED.admin.name, nip:SEED.admin.nip, prodi:SEED.admin.prodi,
+    email:SEED.admin.email, avatar:SEED.admin.avatar, active:true, createdAt:'01 Agu 2026'
+  };
+  const admin = {
+    ...adminTemplate,
+    ...(previousAdmin || {}),
+    id:(previousAdmin && previousAdmin.id) || adminTemplate.id || 'u-3',
+    username:(previousAdmin && previousAdmin.username) || adminTemplate.username || 'admin',
+    password:(previousAdmin && previousAdmin.password) || adminTemplate.password || 'password123',
+    role:'admin', active:true
+  };
+
+  const students = SEED_DUMMY.students.map((student, index) => {
+    const previous = previousUsers.find(u => u && u.role === 'student' &&
+      String(u.nim || u.username || '') === String(student.nim));
+    const previousGpa = Number(previous && previous.gpa);
+    return {
+      ...(previous || {}),
+      id:(previous && previous.id) || `u-25${index + 1}`,
+      username:String(student.nim), password:(previous && previous.password) || 'password123',
+      role:'student', name:student.name, nim:String(student.nim),
+      prodi:student.prodi || 'S1 Informatika', email:(previous && previous.email) || `${student.nim}@mhs.unmul.ac.id`,
+      avatar:(previous && previous.avatar) || seedAvatar(index), active:true,
+      createdAt:(previous && previous.createdAt) || '01 Sep 2026',
+      angkatan:String(student.angkatan), kelas:String(student.kelas),
+      semester:semesterForCohort(student.angkatan),
+      mataKuliahDiambil:[...(student.mataKuliahDiambil || [])],
+      gpa:Number.isFinite(previousGpa) && previousGpa >= 0 && previousGpa <= 4
+        ? Number(previousGpa.toFixed(2)) : Number((3.25 + (index % 7) * 0.1).toFixed(2)),
+      mexs:Number(previous && previous.mexs) || 0,
+      portfolioCount:Number(previous && previous.portfolioCount) || 0,
+      achievementCount:Number(previous && previous.achievementCount) || 0,
+      skills:Array.isArray(previous && previous.skills) ? [...previous.skills] : []
+    };
+  });
+
+  const lecturers = SEED_DUMMY.lecturers.map((lecturer, index) => {
+    const previous = previousUsers.find(u => u && u.role === 'lecturer' &&
+      String(u.nip || u.username || '') === String(lecturer.nip));
+    const assignments = JSON.parse(JSON.stringify(lecturer.mataKuliahDiampu || []));
+    return {
+      ...(previous || {}),
+      id:(previous && previous.id) || `u-d${index + 1}`,
+      username:String(lecturer.nip), password:(previous && previous.password) || 'password123',
+      role:'lecturer', name:lecturer.name, nip:String(lecturer.nip),
+      prodi:'S1 Informatika', email:(previous && previous.email) || lecturer.email || '',
+      avatar:(previous && previous.avatar) || seedAvatar(index + 6), active:true,
+      createdAt:(previous && previous.createdAt) || '01 Sep 2026',
+      mataKuliah:assignments.map(item => item.course).filter(Boolean).join(', '),
+      mataKuliahDiampu:assignments,
+      bidangKeahlian:[...(lecturer.bidangKeahlian || [])],
+      pendidikan:JSON.parse(JSON.stringify(lecturer.pendidikan || [])),
+      publikasi:JSON.parse(JSON.stringify(lecturer.publikasi || []))
+    };
+  });
+
+  // Menimpa daftar akun versi lama, bukan hanya menambah kartu/tampilan baru.
+  db.users = [admin, ...students, ...lecturers];
+  db.demoRosterMigrationVersion = 1;
+  return true;
+}
+
+function cleanupLegacyDemoRecords() {
+  if (!db) return;
+  const studentNims = new Set((db.users || []).filter(u => u.role === 'student').map(u => String(u.nim || u.username || '')));
+  const lecturerNips = new Set((db.users || []).filter(u => u.role === 'lecturer').map(u => String(u.nip || u.username || '')));
+  const canonicalSeedProjects = (SEED.projects || [])
+    .filter(project => DEMO_INTERACTION_PROJECT_IDS.has(String(project.id || '')))
+    .map(project => JSON.parse(JSON.stringify(project)));
+
+  // Reset satu kali seluruh daftar proyek lama ke enam proyek demo yang ditetapkan.
+  // Ini juga menghapus ID proyek lawas yang tidak lagi ada dalam seed saat ini, serta
+  // proyek uji lama yang pemiliknya masih memakai akun dosen/mahasiswa aktif.
+  // Setelah migrasi selesai, proyek baru yang dibuat lewat fitur aplikasi tetap tersimpan.
+  db.projects = canonicalSeedProjects;
+  const remainingProjectIds = new Set(db.projects.map(project => String(project.id || '')));
+  db.projects.forEach(project => {
+    project.members = (project.members || []).filter(member => member && studentNims.has(String(member.nim || '')));
+    project.applicants = (project.applicants || []).filter(member => member && studentNims.has(String(member.nim || '')));
+    (project.groups || []).forEach(group => {
+      group.members = (group.members || []).filter(member => member && studentNims.has(String(member.nim || '')));
+    });
+  });
+
+  // Hapus rekam jejak/invitation/profil yatim milik akun lama.
+  db.achievements = (db.achievements || []).filter(item => item && studentNims.has(String(item.nim || '')));
+  db.portfolios = (db.portfolios || []).filter(item => item && studentNims.has(String(item.nim || '')));
+  db.invitations = (db.invitations || []).filter(item => item && studentNims.has(String(item.nim || '')) &&
+    (!item.projectId || remainingProjectIds.has(String(item.projectId))));
+  db.notifications = (db.notifications || []).filter(item => {
+    if (!item) return false;
+    const studentNim = item.recipientNim || item.studentNim || item.nim;
+    const lecturerNip = item.recipientNip || item.lecturerNip;
+    const projectId = item.projectId || item.relatedProjectId;
+    if (studentNim && !studentNims.has(String(studentNim))) return false;
+    if (lecturerNip && !lecturerNips.has(String(lecturerNip))) return false;
+    if (projectId && !remainingProjectIds.has(String(projectId))) return false;
+    return true;
+  });
+  db.studentProfiles = db.studentProfiles && typeof db.studentProfiles === 'object' ? db.studentProfiles : {};
+  Object.keys(db.studentProfiles).forEach(nim => { if (!studentNims.has(String(nim))) delete db.studentProfiles[nim]; });
+}
+
+// Memuat data terakhir dari cache; saat halaman dibuka, startup lebih dulu meminta data terbaru dari Django.
+function loadDB() {
   try {
-    const raw = serverData ? JSON.stringify(serverData) : null;
-    db = raw ? JSON.parse(raw) : JSON.parse(JSON.stringify(SEED));
+    const raw=localStorage.getItem(STORAGE_KEY); db=raw?JSON.parse(raw):JSON.parse(JSON.stringify(SEED));
     if(!db||typeof db!=='object') throw new Error('Data lokal tidak valid.');
     db.admin=db.admin||JSON.parse(JSON.stringify(SEED.admin));
     const ADMIN_AVATAR='https://images.unsplash.com/photo-1573497019940-1c28c88b4f3e?auto=format&fit=crop&w=150&q=80';
@@ -1222,11 +2418,13 @@ function loadDB(serverData = null) {
     db.admin.prodi=db.admin.prodi||SEED.admin.prodi;
     db.admin.email=db.admin.email||SEED.admin.email;
     db.users=Array.isArray(db.users)?db.users:JSON.parse(JSON.stringify(SEED.users));
+    const rosterMigrationRan = ensureCanonicalDemoAccounts();
+    const projectCleanupMigrationRan = Number(db.demoProjectCleanupVersion || 0) < 1;
     db.announcements=Array.isArray(db.announcements)?db.announcements:JSON.parse(JSON.stringify(SEED.announcements));
     db.talentPool=Array.isArray(db.talentPool)?db.talentPool:JSON.parse(JSON.stringify(SEED.talentPool));
     db.projects=Array.isArray(db.projects)?db.projects:JSON.parse(JSON.stringify(SEED.projects));
     // Hapus profil talenta yatim dari versi lama yang sudah tidak memiliki akun mahasiswa di pengelolaan Admin.
-    const knownStudentNims = new Set((db.users || []).filter(u => u.role === 'student' && u.nim).map(u => String(u.nim)));
+    const knownStudentNims = new Set((db.users || []).filter(u => u.role === 'student' && u.active && u.nim).map(u => String(u.nim)));
     db.talentPool = db.talentPool.filter(t => t && knownStudentNims.has(String(t.nim || '')));
     db.achievements=Array.isArray(db.achievements)?db.achievements:JSON.parse(JSON.stringify(SEED.achievements));
     db.achievements = db.achievements.filter(a => a &&
@@ -1260,6 +2458,30 @@ function loadDB(serverData = null) {
     db.projects.forEach(project => { if (project.category === legacyCourseCategory) project.category = COURSE_CATEGORY; });
     db.masterData.courses=Array.isArray(db.masterData.courses)?db.masterData.courses:[...SEED.masterData.courses];
     db.masterData.courseOfferings=Array.isArray(db.masterData.courseOfferings)?db.masterData.courseOfferings:JSON.parse(JSON.stringify(SEED.masterData.courseOfferings));
+    if (rosterMigrationRan || projectCleanupMigrationRan) {
+      db.masterData.courses = [...SEED_DUMMY.courses];
+      db.masterData.courseOfferings = JSON.parse(JSON.stringify(SEED_DUMMY.courseOfferings));
+      cleanupLegacyDemoRecords();
+      db.demoProjectCleanupVersion = 1;
+      // Normalisasi data browser lama agar label KKN tidak muncul kembali pada akun/proyek yang sah.
+      const normalizeCommunityCourseLabel = value => isCommunityCourseName(value) ? COMMUNITY_CATEGORY : value;
+      db.masterData.courses = db.masterData.courses.map(normalizeCommunityCourseLabel);
+      db.masterData.courseOfferings.forEach(item => { item.course = normalizeCommunityCourseLabel(item.course); });
+      db.users.forEach(user => {
+        if (Array.isArray(user.mataKuliahDiambil)) user.mataKuliahDiambil = user.mataKuliahDiambil.map(normalizeCommunityCourseLabel);
+        if (Array.isArray(user.mataKuliahDiampu)) user.mataKuliahDiampu.forEach(item => { item.course = normalizeCommunityCourseLabel(item.course); });
+        if (typeof user.mataKuliah === 'string') {
+          user.mataKuliah = user.mataKuliah.split(',').map(course => normalizeCommunityCourseLabel(course.trim())).join(', ');
+        }
+      });
+      db.projects.forEach(project => {
+        if (project.category && isCommunityCourseName(project.category)) project.category = COMMUNITY_CATEGORY;
+        if (project.course && isCommunityCourseName(project.course)) project.course = COMMUNITY_CATEGORY;
+      });
+      db.talentPool.forEach(talent => {
+        if (Array.isArray(talent.skills)) talent.skills = talent.skills.map(normalizeCommunityCourseLabel);
+      });
+    }
     db.masterData.classes=Array.isArray(db.masterData.classes)?db.masterData.classes:['A','B','C'];
     db.masterData.achievementCategories=Array.isArray(db.masterData.achievementCategories)?db.masterData.achievementCategories:JSON.parse(JSON.stringify(SEED.masterData.achievementCategories));
     if(typeof db.masterData.mexsThreshold!=='number'||db.masterData.mexsThreshold<=0) db.masterData.mexsThreshold=SEED.masterData.mexsThreshold;
@@ -1267,7 +2489,7 @@ function loadDB(serverData = null) {
 
     db.users.forEach(u => {
       if (u.role === 'student') {
-        if (!u.angkatan) u.angkatan = '';
+        if (!u.angkatan) u.angkatan = '2021';
         if (!u.kelas) u.kelas = '-';
         u.semester = semesterForCohort(u.angkatan);
         delete u.dosenPA;
@@ -1276,8 +2498,11 @@ function loadDB(serverData = null) {
         if (!u.mataKuliahDiampu) u.mataKuliahDiampu = [];
       }
     });
+    ensureDemoInteractionFixtures();
+    ensureTalentPoolForActiveStudents();
+    db.projects.forEach(normalizeProject);
     db.talentPool.forEach(t => {
-      if (!t.angkatan) t.angkatan = '';
+      if (!t.angkatan) t.angkatan = '2021';
       if (!t.kelas) t.kelas = '-';
       const account = db.users.find(u => u.role === 'student' && String(u.nim) === String(t.nim));
       if (account) {
@@ -1289,7 +2514,15 @@ function loadDB(serverData = null) {
       }
     });
 
-    const avatarByIdentity = {};
+    const avatarByIdentity = {
+      '2110512001':'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80',
+      '2110512015':'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=150&q=80',
+      '2110512040':'https://images.unsplash.com/photo-1580489944761-15a19d654956?auto=format&fit=crop&w=150&q=80',
+      '2110505022':'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?auto=format&fit=crop&w=150&q=80',
+      '199005202012011003':'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&w=150&q=80',
+      '198005102005011003':'https://images.unsplash.com/photo-1560250097-0b93528c311a?auto=format&fit=crop&w=150&q=80',
+      'admin':'https://images.unsplash.com/photo-1573497019940-1c28c88b4f3e?auto=format&fit=crop&w=150&q=80'
+    };
     db.users.forEach(u=>{
       const key=u.username || u.nim || u.nip || u.id;
       if(!isNonEmpty(u.avatar||'',500) || !/^https?:\/\//i.test(u.avatar)) u.avatar=avatarByIdentity[key] || SEED.student.avatar;
@@ -1301,6 +2534,11 @@ function loadDB(serverData = null) {
       if(!isNonEmpty(t.avatar||'',500) || !/^https?:\/\//i.test(t.avatar)) t.avatar=avatarByIdentity[t.nim] || SEED.student.avatar;
     });
     db.studentProfiles = db.studentProfiles && typeof db.studentProfiles === 'object' ? db.studentProfiles : {};
+    const currentSeedStudentNim = String(SEED.student.nim);
+    if (!db.studentProfiles[currentSeedStudentNim]) {
+      const currentTalent = (db.talentPool || []).find(t => String(t.nim) === currentSeedStudentNim);
+      db.studentProfiles[currentSeedStudentNim] = { phone:'', bio:'', skills:Array.isArray(currentTalent?.skills) ? [...currentTalent.skills] : [] };
+    }
     Object.keys(db.studentProfiles).forEach(nim => {
       const profile = db.studentProfiles[nim] || {};
       profile.phone = typeof profile.phone === 'string' ? profile.phone : '';
@@ -1308,95 +2546,79 @@ function loadDB(serverData = null) {
       profile.skills = Array.isArray(profile.skills) ? profile.skills.filter(x=>isNonEmpty(x,60)) : [];
       db.studentProfiles[nim] = profile;
     });
-    if (state.userRole === 'student' && SEED.student.nim) {
-      db.studentProfile = ensureStudentProfile(SEED.student.nim);
-      SEED.student.phone = db.studentProfile.phone;
-      SEED.student.bio = db.studentProfile.bio;
-      SEED.student.skills = [...db.studentProfile.skills];
-      syncStudentIdentityFromAdmin();
-      syncTalentPoolRecord(SEED.student.nim);
-    } else {
-      db.studentProfile = { phone: '', bio: '', skills: [] };
-    }
+    db.studentProfile = ensureStudentProfile(SEED.student.nim);
+    if (String(SEED.student.nim) !== String(LEGACY_DEMO_STUDENT_NIM) && db.studentProfiles) delete db.studentProfiles[LEGACY_DEMO_STUDENT_NIM];
+    SEED.student.phone = db.studentProfile.phone;
+    SEED.student.bio = db.studentProfile.bio;
+    SEED.student.skills = [...db.studentProfile.skills];
+    syncStudentIdentityFromAdmin();
+    syncTalentPoolRecord(SEED.student.nim);
     saveDB();
-  } catch(e) { console.error('KREASI: gagal membaca state server', e); db=JSON.parse(JSON.stringify(SEED)); db.notifications=(db.notifications||[]).map(n=>({...n,readBy:{}})); db.studentProfile={phone:SEED.student.phone,bio:SEED.student.bio,skills:[...SEED.student.skills]}; db.studentProfiles={}; db.projects.forEach(normalizeProject); }
+  } catch(e) { db=JSON.parse(JSON.stringify(SEED)); db.notifications=(db.notifications||[]).map(n=>({...n,readBy:{}})); db.studentProfile={phone:SEED.student.phone,bio:SEED.student.bio,skills:[...SEED.student.skills]}; db.studentProfiles={[String(SEED.student.nim)]:{...db.studentProfile,skills:[...db.studentProfile.skills]}}; db.projects.forEach(normalizeProject); try{localStorage.setItem(STORAGE_KEY,JSON.stringify(db));}catch(_){} }
 }
 
-/* Jembatan frontend ke backend Django (bukan penerapan class-based OOP Python).
-   Renderer dan handler lama tetap beroperasi pada objek `db`, tetapi penyimpanan persisten
-   dilakukan oleh `KreasiStateRepository` melalui /api/state/. Antrean Promise mempertahankan
-   urutan snapshot saat handler sinkron memanggil saveDB() berulang kali. Aturan akses final
-   tetap dijalankan di backend; validasi/penyembunyian menu JavaScript bukan batas keamanan. */
-let __kreasiSaveQueue = Promise.resolve();
-let __kreasiLastSaveError = '';
-let __kreasiVersion = null;       // versi snapshot server yang terakhir dimuat/disimpan klien ini
-let __kreasiPending = 0;          // jumlah penyimpanan yang masih antre
-let __kreasiSuppressSave = false; // true saat memuat ulang dari server (hindari simpan balik)
-function readCookie(name) {
-  const part = document.cookie.split(';').map(v => v.trim()).find(v => v.startsWith(name + '='));
-  return part ? decodeURIComponent(part.slice(name.length + 1)) : '';
-}
-/* Pembungkus fetch() ke backend: menyertakan cookie sesi dan token CSRF pada permintaan
-   tulis, mengubah respons JSON, dan melempar Error bila server menolak (mis. 401/403). */
-async function kreasiApi(url, options = {}) {
-  const opts = { credentials: 'same-origin', ...options };
-  const headers = new Headers(opts.headers || {});
-  const method = String(opts.method || 'GET').toUpperCase();
-  const isForm = typeof FormData !== 'undefined' && opts.body instanceof FormData;
-  if (opts.body !== undefined && opts.body !== null && !isForm && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json');
-  }
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) headers.set('X-CSRFToken', readCookie('csrftoken'));
-  opts.headers = headers;
-  const response = await fetch(url, opts);
-  const type = response.headers.get('content-type') || '';
-  let payload = {};
-  if (type.includes('application/json')) payload = await response.json();
-  if (!response.ok) {
-    const error = new Error(payload.message || 'Permintaan ke server gagal. Periksa koneksi atau sesi login.');
-    error.status = response.status;
-    throw error;
-  }
-  return payload;
-}
-function safeStateWithoutPasswords(source) {
-  const safe = JSON.parse(JSON.stringify(source || {}));
-  (safe.users || []).forEach(user => { if (user && typeof user === 'object') delete user.password; });
-  return safe;
-}
-/* FITUR PENYIMPANAN: dipanggil setelah hampir setiap aksi pengguna. Mengirim salinan `db` ke
-   POST /api/state/ lewat antrean (urutan terjaga). Server yang memutuskan bagian mana yang
-   benar-benar boleh tersimpan menurut peran. */
+// Menyimpan data aplikasi ke cache browser dan menjadwalkan salinan utama ke database Django.
+// Fungsi tetap mengembalikan boolean secara langsung agar seluruh tombol UI lama bekerja seperti sebelumnya.
 function saveDB() {
-  if (!db) return false;
+  let snapshot;
   try {
-    const snapshot = JSON.parse(JSON.stringify(db));
-    if (!state.userRole) return true; // The landing page never persists anonymous client data.
-    if (__kreasiSuppressSave) return true;
-    __kreasiPending++;
-    __kreasiSaveQueue = __kreasiSaveQueue.then(() => kreasiApi('/api/state/', {
-      method: 'POST', body: JSON.stringify({ state: snapshot, baseVersion: __kreasiVersion })
-    })).then(result => {
-      if (result && Number.isInteger(result.version)) __kreasiVersion = result.version;
-      __kreasiLastSaveError = '';
-    }).catch(error => {
-      console.error('KREASI: state tidak berhasil disimpan ke Django', error);
-      if (__kreasiLastSaveError !== error.message && document.readyState !== 'loading') {
-        showToast(error.status === 401 ? 'Sesi login berakhir. Masuk kembali untuk menyimpan perubahan.' : (error.message || 'Perubahan gagal disimpan ke server.'), 'error');
-      }
-      __kreasiLastSaveError = error.message;
-    }).finally(() => { __kreasiPending = Math.max(0, __kreasiPending - 1); });
-    // Kata sandi hanya dikirim sekali ke backend untuk dibuat hash; jangan disimpan di browser.
-    (db.users || []).forEach(user => { if (user && typeof user === 'object') delete user.password; });
-    return true;
+    snapshot = JSON.stringify(db);
+    localStorage.setItem(STORAGE_KEY, snapshot); // Cache lokal membantu ketika jaringan terputus sementara.
   } catch (error) {
-    console.error('KREASI: data tidak dapat disiapkan untuk server', error);
+    console.error('KREASI: gagal membuat salinan data', error);
     if (document.readyState !== 'loading') showToast('Perubahan gagal disiapkan untuk disimpan.', 'error');
     return false;
   }
+  pendingServerSave = pendingServerSave.catch(() => null).then(async () => {
+    const response = await apiRequest('/api/state/', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: JSON.parse(snapshot) })
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      // Saat halaman baru dibuka belum ada sesi; kegagalan sinkron awal ditangani lagi setelah login.
+      if (state.userRole) showToast(result.error || 'Data belum berhasil disinkronkan ke server.', 'error');
+      throw new Error(result.error || `Server menolak penyimpanan (${response.status}).`);
+    }
+    return true;
+  }).catch(error => {
+    console.warn('KREASI: sinkronisasi Django tertunda/gagal:', error.message);
+    return false;
+  });
+  return true;
 }
 
-const TALENT_PORTFOLIOS = {};
+// Menunggu antrean data selesai sebelum proses login agar data dummy awal sudah tersimpan di server.
+async function waitForServerSave() {
+  await pendingServerSave.catch(() => false);
+}
+
+// Memastikan login demo yang sudah divalidasi antarmuka juga tercatat pada sesi Django.
+async function createServerSession(username, password) {
+  await waitForServerSave();
+  const response = await apiRequest('/api/session/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || 'Sesi Django tidak dapat dibuat.');
+  return result;
+}
+
+// Menghapus sesi server saat pengguna menyelesaikan proses keluar dari portal.
+function clearServerSession() {
+  apiRequest('/api/session/logout/', { method: 'POST' }).catch(error => {
+    console.warn('KREASI: sesi server tidak berhasil dihapus:', error.message);
+  });
+}
+
+const TALENT_PORTFOLIOS = {
+  '2110512015':[['Aplikasi Mobile Pemesanan Kantin Kampus','Mobile Application','Flutter dengan integrasi pembayaran digital.'],['Redesign UI/UX Portal Akademik','UI/UX Design','Riset pengguna dan prototipe Figma.']],
+  '2110505022':[['Dashboard Analitik Penjualan UMKM','Data Analysis','Visualisasi data penjualan memakai Tableau dan SQL.'],['Prediksi Harga Komoditas','Machine Learning','Model regresi untuk harga komoditas lokal.']],
+  '2110512040':[['Simulasi Keamanan Jaringan Kampus','Cyber Security','Pengujian celah jaringan pada lingkungan lab.'],['Otomasi Server Monitoring','Networking','Skrip pemantauan server berbasis Linux.']]
+};
 function portfolioOf(nim) {
   const saved = (db.portfolios || []).filter(p => String(p.nim || LEGACY_DEMO_STUDENT_NIM) === String(nim));
   if (saved.length || String(nim) === LEGACY_DEMO_STUDENT_NIM) return saved;
@@ -1438,7 +2660,7 @@ function syncTalentPoolRecord(nim = SEED.student.nim) {
   talent.mexs = mexsPoints(nim);
 }
 function portfolioHtml(list) {
-  return list.length ? list.map(x => `<div class="p-3 rounded-2xl border border-slate-200 mb-2"><p class="text-2xs font-bold text-violet-700 uppercase">${esc(x.category)}</p><p class="text-xs font-bold text-slate-800 mt-0.5">${esc(x.title)}</p><p class="text-2xs text-slate-500 mt-1">${esc(x.desc)}</p>${x.link && x.link !== '#' ? `<a href="${esc(x.link)}" target="_blank" rel="noopener" class="text-2xs font-bold text-violet-700 hover:underline">Buka tautan</a>` : ''}${x.fileId ? `<div class="flex flex-wrap gap-2 mt-2"><button onclick="openStoredDocument('${esc(x.fileId)}')" class="text-2xs font-bold text-violet-700 hover:underline">Lihat berkas</button><button onclick="downloadStoredDocument('${esc(x.fileId)}')" class="text-2xs font-bold text-violet-700 hover:underline">Unduh berkas</button>${state.userRole === 'student' && String(SEED.student.nim) === String(x.nim) ? `<button onclick="removePortfolioDocument('${esc(x.id)}')" class="text-2xs font-bold text-rose-600 hover:underline">Hapus berkas</button>` : ''}</div>` : (x.file ? `<p class="hint">Berkas fisik belum tersedia pada penyimpanan server.</p>` : '')}</div>`).join('') : '<p class="text-2xs text-slate-400">Belum ada portofolio.</p>';
+  return list.length ? list.map(x => `<div class="p-3 rounded-2xl border border-slate-200 mb-2"><p class="text-2xs font-bold text-violet-700 uppercase">${esc(x.category)}</p><p class="text-xs font-bold text-slate-800 mt-0.5">${esc(x.title)}</p><p class="text-2xs text-slate-500 mt-1">${esc(x.desc)}</p>${x.link && x.link !== '#' ? `<a href="${esc(x.link)}" target="_blank" rel="noopener" class="text-2xs font-bold text-violet-700 hover:underline">Buka tautan</a>` : ''}${x.fileId ? `<div class="flex flex-wrap gap-2 mt-2"><button onclick="openStoredDocument('${esc(x.fileId)}')" class="text-2xs font-bold text-violet-700 hover:underline">Lihat berkas</button><button onclick="downloadStoredDocument('${esc(x.fileId)}')" class="text-2xs font-bold text-violet-700 hover:underline">Unduh berkas</button>${state.userRole === 'student' && String(SEED.student.nim) === String(x.nim) ? `<button onclick="removePortfolioDocument('${esc(x.id)}')" class="text-2xs font-bold text-rose-600 hover:underline">Hapus berkas</button>` : ''}</div>` : (x.file ? `<p class="hint">Berkas fisik belum tersedia pada penyimpanan browser.</p>` : '')}</div>`).join('') : '<p class="text-2xs text-slate-400">Belum ada portofolio.</p>';
 }
 const supervisorOf = p => p.supervisor || (p.status === 'Diajukan' ? '' : SEED.lecturer.name);
 const isLecturerNip = nip => !!nip && db.users.some(u => u.role === 'lecturer' && u.nip === nip);
@@ -1564,7 +2786,7 @@ function syncStudentIdentityFromAdmin() { const u=currentStudentUser(); if(!u) r
 function hasAppliedToProject(project, nim=SEED.student.nim) { if(!project) return false; if (isGroupProject(project)) return (project.groups || []).some(g => g.members.some(m => m.nim === nim)); return (project.members||[]).some(m=>m.nim===nim) || (project.applicants||[]).some(a=>a.nim===nim); }
 function canApplyToProject(project, nim=SEED.student.nim) { 
   if(!project || project.status!=='Open') return {ok:false,message:'Proyek tidak tersedia untuk pendaftaran.'};
-  if (!isPublicMarketplaceProject(project)) return {ok:false,message:'Proyek Mata Kuliah dan Informatika untuk Masyarakat bersifat privat dan tidak menerima pelamar dari luar.'};
+  if (!isPublicMarketplaceProject(project)) return {ok:false,message:'Proyek Mata Kuliah dan Informatika Untuk Masyarakat bersifat privat dan tidak menerima pelamar dari luar.'};
   if(hasAppliedToProject(project,nim)) return {ok:false,message:'Anda sudah terdaftar atau sudah pernah mendaftar pada proyek ini.'}; 
   if(isProjectAtCapacity(project)) return {ok:false,message:'Kuota total anggota proyek sudah penuh.'};
   if (project.registrationClosed) return {ok:false,message:'Pendaftaran proyek ini telah ditutup.'};
@@ -2019,6 +3241,7 @@ function openInvitationsModal() {
 /* ============================================================================
    ROUTER
    ========================================================================== */
+// Router UI lama memilih portal berdasarkan peran dan menu aktif, sehingga tampilan tidak perlu dirancang ulang.
 function render() {
   const app = $('app');
   if (state.currentView === 'landing')       app.innerHTML = renderLanding();
@@ -2331,7 +3554,7 @@ function openRegistrationInfoModal() {
         <div class="p-3.5 rounded-2xl bg-white border border-slate-200">
           <p class="text-2xs font-bold text-slate-500 uppercase">Kontak Admin</p>
           <p class="text-xs font-semibold text-slate-800 mt-1">${esc(SEED.admin.name)}</p>
-          <p class="text-2xs text-slate-500 mt-1">${esc(SEED.admin.email || 'admin@unmul.ac.id')}</p>
+          <p class="text-2xs text-slate-500 mt-1">${esc(SEED.admin.email)}</p>
         </div>
         <div class="p-3.5 rounded-2xl bg-white border border-slate-200">
           <p class="text-2xs font-bold text-slate-500 uppercase">Lokasi Layanan</p>
@@ -2354,66 +3577,47 @@ function openRegistrationInfoModal() {
   });
 }
 
-function applyLoggedInProfile(user) {
-  if (!user) return;
-  const name = user.name || user.full_name || user.username || '';
-  if (user.role === 'student') {
-    Object.assign(SEED.student, {
-      name, nim: user.nim || user.identifier || user.username || '',
-      prodi: user.prodi || 'S1 Informatika', email: user.email || '',
-      avatar: user.avatar || '', angkatan: user.angkatan || '', kelas: user.kelas || '-',
-      semester: user.semester || semesterForCohort(user.angkatan),
-      gpa: Number(user.gpa || 0), phone: user.phone || '', bio: user.bio || '',
-      skills: Array.isArray(user.skills) ? user.skills : []
-    });
-  } else if (user.role === 'lecturer') {
-    Object.assign(SEED.lecturer, {
-      name, nip: user.nip || user.identifier || user.username || '',
-      email: user.email || '', avatar: user.avatar || '', prodi: user.prodi || 'S1 Informatika',
-      jabatan: user.jabatan || '', jabatanFungsional: user.jabatanFungsional || '',
-      nidn: user.nidn || '', gelar: user.gelar || '',
-      mataKuliahDiampu: Array.isArray(user.mataKuliahDiampu) ? user.mataKuliahDiampu : [],
-      bidangKeahlian: Array.isArray(user.bidangKeahlian) ? user.bidangKeahlian : [],
-      pendidikan: Array.isArray(user.pendidikan) ? user.pendidikan : [],
-      publikasi: Array.isArray(user.publikasi) ? user.publikasi : []
-    });
-  } else if (user.role === 'admin') {
-    Object.assign(SEED.admin, {
-      name, nip: user.nip || user.identifier || user.username || '',
-      email: user.email || '', avatar: user.avatar || '', prodi: user.prodi || 'S1 Informatika'
-    });
-  }
-}
-
-/* FITUR LOGIN: kirim username/sandi/peran ke server (views.login_view). Bila berhasil,
-   ambil data sesuai peran (GET /api/state/) lalu buka portal. Gagal -> pesan generik. */
 async function handleLoginSubmit(e) {
   e.preventDefault();
-  const username = ($('login-username')?.value || '').trim();
-  const password = $('login-password')?.value || '';
-  if (!username || !password) {
-    showToast('Username dan kata sandi wajib diisi.', 'error');
-    (!username ? $('login-username') : $('login-password'))?.focus();
-    return;
-  }
   try {
-    const result = await kreasiApi('/api/auth/login/', {
-      method: 'POST', body: JSON.stringify({ username, password, role: state.loginRole })
-    });
-    state.userRole = result.user.role;
-    applyLoggedInProfile(result.user);
-    const response = await kreasiApi('/api/state/');
-    __kreasiVersion = Number.isInteger(response.version) ? response.version : null;
-    loadDB(response.state);
-    applyLoggedInProfile(result.user);
-    loginAs(result.user.role);
-  } catch (error) {
-    console.error('KREASI: autentikasi Django gagal', error);
-    const message = error.status === 401 ? 'Akun tidak terdaftar di sistem' : (error.message || AUTH_ERROR_MESSAGE);
-    showToast(message, 'error');
-    if (error.status === 401) $('login-username')?.focus();
-  }
+    const username = ($('login-username')?.value || '').trim();
+    const password = $('login-password')?.value || '';
+    if (!username && !password) { showToast('Username dan kata sandi wajib diisi.', 'error'); return; }
+    if (!username) { showToast('Username wajib diisi.', 'error'); $('login-username')?.focus(); return; }
+    if (!password) { showToast('Kata sandi wajib diisi.', 'error'); $('login-password')?.focus(); return; }
+    const user = getUser(username);
+    if (!user) { showToast('Username tidak terdaftar di sistem.', 'error'); $('login-username')?.focus(); return; }
+    if (user.password !== password) { showToast('Kata sandi salah. Periksa kembali kata sandi Anda.', 'error'); $('login-password')?.focus(); return; }
+    if (!user.active) { showToast('Akun sedang nonaktif. Hubungi administrator untuk mengaktifkannya.', 'error'); return; }
+    if (user.role !== state.loginRole) { showToast('Akun ini tidak sesuai dengan peran login yang dipilih.', 'error'); return; }
+    // Validasi sesi di Django menjaga agar proses simpan data berikutnya memakai sesi yang sah.
+    try { await createServerSession(username, password); } catch (sessionError) { showToast(sessionError.message || 'Login ke server gagal.', 'error'); return; }
+    if (user.role === 'lecturer') {
+      Object.assign(SEED.lecturer, {
+        nip:user.nip, name:user.name, email:user.email || '', avatar:user.avatar || SEED.student.avatar,
+        prodi:user.prodi || 'S1 Informatika', jabatanFungsional:user.jabatanFungsional || '',
+        nidn:user.nidn || '', gelar:user.gelar || '',
+        mataKuliahDiampu:Array.isArray(user.mataKuliahDiampu) ? user.mataKuliahDiampu : [],
+        bidangKeahlian:Array.isArray(user.bidangKeahlian) ? user.bidangKeahlian : [],
+        pendidikan:Array.isArray(user.pendidikan) ? user.pendidikan : [],
+        publikasi:Array.isArray(user.publikasi) ? user.publikasi : []
+      });
+    } else if (user.role === 'student') {
+      SEED.student.nim = user.nim;
+      SEED.student.angkatan = user.angkatan || '';
+      SEED.student.kelas = user.kelas || '-';
+      if (user.avatar) SEED.student.avatar = user.avatar;
+      syncStudentIdentityFromAdmin();
+      const talent = db.talentPool.find(t => String(t.nim) === String(user.nim));
+      SEED.student.gpa = talent && Number.isFinite(Number(talent.gpa)) ? Number(talent.gpa) : 0;
+      SEED.student.semester = semesterForCohort(user.angkatan);
+      activateStudentProfile(user.nim);
+    }
+    loginAs(user.role);
+    saveDB(); // Mengirim normalisasi profil/identitas ke server setelah sesi login aktif.
+  } catch (err) { console.error(err); showToast(AUTH_ERROR_MESSAGE, 'error'); }
 }
+
 function loginAs(role) {
   state.userRole = role;
   state.currentView = role === 'student' ? 'student' : role === 'lecturer' ? 'lecturer' : 'admin';
@@ -2426,20 +3630,17 @@ function loginAs(role) {
   render();
   if (role === 'student') showToast(`Berhasil masuk sebagai Mahasiswa — ${SEED.student.name}`, 'success');
   else if (role === 'lecturer') showToast(`Berhasil masuk sebagai Dosen — ${SEED.lecturer.name}`, 'success');
-  else showToast(`Berhasil masuk sebagai Administrator — ${SEED.admin.name}`, 'success');
+  else showToast('Berhasil masuk sebagai Administrator — Rina Kartika Sari, S.Kom., M.Cs.', 'success');
 }
 function logout() {
   openModal({ title: 'Keluar dari sistem?', subtitle: 'Perubahan yang belum disimpan dapat hilang.', size: 'sm', body: `
     <div class="flex justify-end gap-2"><button onclick="closeModal()" class="btn btn-secondary">Batal</button><button onclick="closeModal(); doLogout()" class="btn btn-primary">Ya, Keluar</button></div>` });
 }
-/* FITUR LOGOUT: tunggu penyimpanan yang antre selesai, akhiri sesi di server, kembali ke beranda. */
-async function doLogout() {
-  try { await __kreasiSaveQueue; await kreasiApi('/api/auth/logout/', { method: 'POST', body: '{}' }); }
-  catch (error) { console.warn('KREASI: penutupan sesi server tidak tuntas', error); }
+function doLogout() {
+  clearServerSession(); // Tutup sesi backend tanpa mengubah alur dialog keluar yang asli.
   state.userRole = null;
   state.currentView = 'landing';
   state.mobileNav = false;
-  db = null;
   render();
   showToast('Anda telah keluar dari sistem.', 'info');
 }
@@ -2447,6 +3648,7 @@ async function doLogout() {
 /* ============================================================================
    STUDENT PORTAL
    ========================================================================== */
+// Menyusun portal mahasiswa beserta menu profil, prestasi, SKPI, bursa, dan proyek saya.
 function renderStudentShell() {
   const u = SEED.student;
   const pendingInv = db.invitations.filter(inv => String(inv.nim || LEGACY_DEMO_STUDENT_NIM) === String(SEED.student.nim) && inv.status === 'Menunggu Respon').length;
@@ -3172,7 +4374,7 @@ function studentProjects() {
               <div class="flex flex-wrap items-center gap-2"><span class="text-2xs font-bold text-violet-700 uppercase">${esc(p.category)}</span>${badge('Menunggu Persetujuan')}<span class="text-2xs font-mono text-slate-500">${esc(p.id)}</span></div>
               <h3 class="text-xs font-extrabold text-slate-900 mt-1.5">${esc(p.title)}</h3>
               <p class="text-2xs text-slate-600 mt-1 line-clamp-2">${esc(p.description)}</p>
-              <p class="text-2xs text-slate-500 mt-1">Periode: ${esc(p.period)} · Anggota dibutuhkan: ${esc(String(p.membersNeeded || 1))}</p>
+              <p class="text-2xs text-slate-500 mt-1">Periode: ${esc(p.period)}${!isPrivateProjectCategory(p) ? ` · Anggota dibutuhkan: ${esc(String(p.membersNeeded || 1))}` : ''}</p>
             </div>
             <div class="flex flex-wrap gap-2 shrink-0">
               <button onclick="openProjectDetail('${p.id}')" class="btn btn-secondary btn-sm">Detail</button>
@@ -3313,7 +4515,7 @@ function openProjectDetail(id) {
 
       <div class="grid sm:grid-cols-2 gap-3">
         ${[
-          [projectCreatorLabel(p), creatorDisplay],
+          ...(projectCreatorLabel(p) ? [[projectCreatorLabel(p), creatorDisplay]] : []),
           ...(p.supervisor && (!isLecturerProposalDetail || isCourseProject(p))
             ? [[isLecturerProposalDetail ? 'Dosen Pengampu yang Dipilih' : 'Dosen Pembimbing', p.supervisor]] : []),
           ...(!isCourseProject(p) ? [['Mitra / Instansi', p.mitra], ['Lokasi', p.lokasi]] : []),
@@ -3628,11 +4830,11 @@ function openCreateProjectModal(projectId = null) {
   const courseOptions = isLecturer
     ? (lecturerCourses.length
         ? lecturerCourses.map(mk => `<option value="${esc(mk.course)}">${esc(mk.course)}</option>`).join('')
-        : '<option value="">— Tidak ada mata kuliah selain Informatika untuk Masyarakat yang diampu —</option>')
+        : '<option value="">— Tidak ada mata kuliah selain Informatika Untuk Masyarakat yang diampu —</option>')
     : isStudent
       ? (studentProjectCourses.length
           ? studentProjectCourses.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')
-          : '<option value="">— Tidak ada mata kuliah selain Informatika untuk Masyarakat yang diambil —</option>')
+          : '<option value="">— Tidak ada mata kuliah selain Informatika Untuk Masyarakat yang diambil —</option>')
       : courses.filter(c => !isCommunityCourseName(c)).map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
 
   const initialCategory = editingProject ? editingProject.category : (categories[0] || '');
@@ -3643,8 +4845,8 @@ function openCreateProjectModal(projectId = null) {
     subtitle: editingProject
       ? 'Perbarui data usulan sebelum dosen memberikan keputusan. Perubahan tidak mengaktifkan proyek; status tetap menunggu persetujuan.'
       : isLecturer
-        ? 'Pilih kategori kegiatan. Untuk Proyek Mata Kuliah, tentukan mata kuliah, angkatan, kelas, dan bentuk tugas. Pada proyek Informatika untuk Masyarakat, dosen pembuat otomatis menjadi pembimbing.'
-        : 'Usulan Proyek Mata Kuliah ditinjau dosen pengampu pilihan Anda. Usulan Informatika untuk Masyarakat akan ditinjau dosen.',
+        ? 'Pilih kategori kegiatan. Untuk Proyek Mata Kuliah, tentukan mata kuliah, angkatan, kelas, dan bentuk tugas. Pada proyek Informatika Untuk Masyarakat, dosen pembuat otomatis menjadi pembimbing.'
+        : 'Usulan Proyek Mata Kuliah ditinjau dosen pengampu pilihan Anda. Usulan Informatika Untuk Masyarakat akan ditinjau dosen.',
     size: 'xl',
     body: `
     <form onsubmit="saveNewProject(event)" class="space-y-4" novalidate>
@@ -3903,9 +5105,17 @@ function isCourseProjectForm() {
 
 function updateMemberSlotsVisibility() {
   const category = $('np-category')?.value || '';
+  const isPrivateCategory = category === COURSE_CATEGORY || category === COMMUNITY_CATEGORY;
   const wrap = $('np-slots-wrap');
   const hint = $('np-slots-hint');
-  if (wrap) wrap.classList.toggle('hidden', category === COURSE_CATEGORY || category === COMMUNITY_CATEGORY);
+  const slotsInput = $('np-slots');
+  if (wrap) wrap.classList.toggle('hidden', isPrivateCategory);
+  // Field kuota hanya berlaku untuk proyek umum yang masuk Bursa Proyek.
+  // Nonaktifkan validasi native juga ketika field tersembunyi.
+  if (slotsInput) {
+    slotsInput.required = !isPrivateCategory;
+    slotsInput.disabled = isPrivateCategory;
+  }
   if (hint) hint.textContent = $('np-isgroup')?.checked
     ? 'Jumlah anggota yang dibutuhkan minimal 1. Kapasitas tiap kelompok diatur terpisah di bawah.'
     : 'Jumlah anggota yang dibutuhkan harus minimal 1 orang.';
@@ -4042,7 +5252,7 @@ function renderGroupFields() {
   const emptyMsg = courseProjectForm && !students.length
     ? 'Pilih dosen pengampu, angkatan, dan kelas pada bagian atas untuk menampilkan daftar mahasiswa.'
     : (($('np-category')?.value || '') === COMMUNITY_CATEGORY && !students.length
-      ? 'Belum ada mahasiswa aktif dengan mata kuliah Informatika untuk Masyarakat yang tercatat pada akunnya.'
+      ? 'Belum ada mahasiswa aktif dengan mata kuliah Informatika Untuk Masyarakat yang tercatat pada akunnya.'
       : (state.userRole === 'student' && !students.length
         ? 'Tidak ada akun mahasiswa aktif yang dikelola Admin pada angkatan Anda.'
         : 'Belum ada mahasiswa yang sesuai.'));
@@ -4239,12 +5449,12 @@ async function saveNewProject(e) {
       return;
     }
     if (category === COURSE_CATEGORY && isCommunityCourseName(course)) {
-      showToast('Mata kuliah Informatika untuk Masyarakat harus dibuat melalui kategori Informatika untuk Masyarakat, bukan Proyek Mata Kuliah.', 'error');
+      showToast('Mata kuliah Informatika Untuk Masyarakat harus dibuat melalui kategori Informatika Untuk Masyarakat, bukan Proyek Mata Kuliah.', 'error');
       $('np-course')?.focus();
       return;
     }
     if (isStudent && category === COMMUNITY_CATEGORY && !studentTakesCommunityCourse(SEED.student && SEED.student.nim)) {
-      showToast('Hanya mahasiswa yang mengambil mata kuliah Informatika untuk Masyarakat yang dapat mengusulkan proyek pada kategori ini.', 'error');
+      showToast('Hanya mahasiswa yang mengambil mata kuliah Informatika Untuk Masyarakat yang dapat mengusulkan proyek pada kategori ini.', 'error');
       categoryEl?.focus();
       return;
     }
@@ -4253,7 +5463,7 @@ async function saveNewProject(e) {
       return;
     }
     if (isLecturer && category === COMMUNITY_CATEGORY && !lecturerTeachesCommunityCourse(lecturerNip)) {
-      showToast('Kategori Informatika untuk Masyarakat hanya tersedia bagi dosen yang tercatat mengampu mata kuliah tersebut.', 'error');
+      showToast('Kategori Informatika Untuk Masyarakat hanya tersedia bagi dosen yang tercatat mengampu mata kuliah tersebut.', 'error');
       return;
     }
     const title = requireText('np-title', 'Nama proyek', 150);
@@ -4419,7 +5629,7 @@ async function saveNewProject(e) {
           const message = category === COURSE_CATEGORY
             ? `${invalidMember.name} tidak sesuai dengan mata kuliah, angkatan, atau kelas yang dipilih.`
             : category === COMMUNITY_CATEGORY
-              ? `${invalidMember.name} tidak tercatat mengambil mata kuliah Informatika untuk Masyarakat.`
+              ? `${invalidMember.name} tidak tercatat mengambil mata kuliah Informatika Untuk Masyarakat.`
               : isLecturer
                 ? `${invalidMember.name} tidak mengambil mata kuliah yang diampu dosen pembuat proyek atau tidak memiliki data enrolmen yang valid.`
                 : `${invalidMember.name} bukan mahasiswa aktif dari angkatan Anda atau akunnya tidak dikelola Admin.`;
@@ -4504,7 +5714,7 @@ async function saveNewProject(e) {
         if (newProject.attachment) newProject.attachment.id = attachmentFileId;
       } catch (documentError) {
         console.error('KREASI: lampiran proyek gagal disimpan', documentError);
-        showToast('Dokumen pendukung tidak dapat disimpan pada server. Periksa koneksi dan coba lagi.', 'error');
+        showToast('Dokumen pendukung tidak dapat disimpan pada browser ini. Coba lagi melalui browser terbaru atau tanpa lampiran.', 'error');
         return;
       }
     }
@@ -4809,7 +6019,7 @@ function studentProjectWorkspace(id, groupId) {
         <div class="mb-4">${progressBar(progress.pct)}<p class="text-2xs text-slate-500 mt-2">${progress.done} dari ${progress.total} tahap disetujui dosen.</p></div>
         <dl class="space-y-3 text-xs">
           ${[
-            [projectCreatorLabel(p), p.creator],
+            ...(projectCreatorLabel(p) ? [[projectCreatorLabel(p), p.creator]] : []),
             ['Dosen Pembimbing', supervisorOf(p) || 'Menunggu dosen pembimbing'],
             ['Peran Anda', isGroup && activeGroup
               ? ((activeGroup.members.find(m => m.nim === SEED.student.nim)?.role) || (activeGroup.members.some(m => m.nim === SEED.student.nim) ? 'Anggota' : 'Belum terdaftar'))
@@ -5060,7 +6270,7 @@ async function submitMilestone(e, projectId, key, groupId) {
     showToast(`Dokumen "${m.name}" berhasil diunggah dan siap diverifikasi.`, 'success');
   } catch (err) {
     console.error('KREASI: unggah dokumen gagal', err);
-    showToast('Dokumen gagal disimpan. Periksa koneksi ke server dan coba kembali.', 'error');
+    showToast('Dokumen gagal disimpan. Periksa koneksi penyimpanan browser dan coba kembali.', 'error');
   }
 }
 
@@ -5305,8 +6515,8 @@ function skpiContentForStudent(s, approved, mexs) {
         <div>Samarinda, ${today()}</div>
         <div>Ketua Program Studi S1 Informatika</div>
         <div style="height:70px;"></div>
-        <div style="font-weight:bold;text-decoration:underline;">Dr. Eng. H. Awang Faisal, M.Kom.</div>
-        <div>NIP. 198205122008121002</div>
+        <div style="font-weight:bold;text-decoration:underline;">Dr. Rudi Hartono, S.T., M.Eng.</div>
+        <div>NIP. 199005202012011003</div>
       </div>
     </div>`;
 }
@@ -5334,6 +6544,7 @@ function printSkpi(nim) {
 /* ============================================================================
    LECTURER PORTAL
    ========================================================================== */
+// Menyusun portal dosen untuk profil, talent pool, pembimbingan, dan pengelolaan proyek.
 function renderLecturerShell() {
   const L = SEED.lecturer;
   const pendingProposals = proposalsForRole('lecturer').length;
@@ -5459,7 +6670,6 @@ function lecturerProfile() {
         ${[
           ['Program Studi', L.prodi],
           ['Fakultas', APP.faculty],
-          ['Jabatan', L.jabatan],
           ['Surel', L.email],
           ['Bidang Keahlian', (L.bidangKeahlian || []).join(', ') || '-']
         ].map(([k, v]) => `
@@ -5949,7 +7159,7 @@ function lecturerProjectDocumentation(id, groupId) {
 
         <dl class="mt-4 space-y-3 text-xs">
           ${[
-            [projectCreatorLabel(p), `${p.creator} (${p.creatorRole})`],
+            ...(projectCreatorLabel(p) ? [[projectCreatorLabel(p), `${p.creator} (${p.creatorRole})`]] : []),
             ['Dosen Pembimbing', supervisorOf(p) || 'Menunggu dosen pembimbing'],
             ...(!isCourseProject(p) ? [['Mitra / Instansi', p.mitra], ['Lokasi', p.lokasi]] : []),
             ['Program', p.course],
@@ -6792,7 +8002,7 @@ function openInviteTalentModal(nim) {
           <option value="">— Pilih proyek umum —</option>
           ${inviteProjects.map(p => `<option value="${esc(p.id)}">${esc(p.title)}</option>`).join('')}
         </select>` : `
-        <p class="p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs text-slate-600">Belum ada proyek umum milik Anda yang dapat dipilih. Proyek Tugas Kuliah dan Informatika untuk Masyarakat tidak tersedia untuk undangan Katalog Talenta.</p>`}
+        <p class="p-3 rounded-xl border border-slate-200 bg-slate-50 text-xs text-slate-600">Belum ada proyek umum milik Anda yang dapat dipilih. Proyek Tugas Kuliah dan Informatika Untuk Masyarakat tidak tersedia untuk undangan Katalog Talenta.</p>`}
       </div>
       <div>
         <label class="lbl" for="inv-role">Peran yang Ditawarkan</label>
@@ -6826,7 +8036,7 @@ function sendInvitation(e, nim) {
   db.invitations.push({
     id: uid('inv'), nim:String(nim),
     sender: SEED.lecturer.name,
-    role: SEED.lecturer.jabatan,
+    role: 'Dosen Pembimbing',
     projectId: p.id,
     projectTitle: p.title,
     message: $('inv-message').value.trim(),
@@ -6949,6 +8159,9 @@ function openReviewProposalModal(id) {
   if (state.userRole !== 'lecturer') { showToast('Hanya dosen yang dapat meninjau usulan proyek.', 'error'); return; }
   const p = getProject(id);
   if (!p || p.status !== 'Diajukan') { showToast('Usulan proyek tidak ditemukan atau sudah ditinjau.', 'warn'); return; }
+  if (!proposalsForRole('lecturer').some(item => String(item.id) === String(id)) || !canApproveProject(p, 'lecturer', SEED.lecturer)) {
+    showToast('Usulan ini ditujukan kepada dosen lain. Hanya dosen yang dipilih mahasiswa yang dapat meninjaunya.', 'error'); return;
+  }
   const isCourse = isCourseProject(p), isIum = isIumProject(p);
   const approveValue = (isCourse || isIum) ? STATUS_ACTIVE : 'Open';
 
@@ -6984,6 +8197,10 @@ function submitReviewProposal(e, id) {
   const p = getProject(id);
   if (!p || p.status !== 'Diajukan' || p.ownerNip) {
     showToast('Usulan ini sudah ditinjau atau telah menjadi milik dosen lain.', 'warn');
+    closeModal(); render(); return;
+  }
+  if (!proposalsForRole('lecturer').some(item => String(item.id) === String(id)) || !canApproveProject(p, 'lecturer', SEED.lecturer)) {
+    showToast('Usulan ini ditujukan kepada dosen lain. Keputusan tidak disimpan.', 'error');
     closeModal(); render(); return;
   }
   const decision = $('rv-decision').value;
@@ -7199,6 +8416,7 @@ function decideApplicant(projectId, applicantId, decision) {
 /* ============================================================================
    ADMIN PORTAL
    ========================================================================== */
+// Menyusun portal administrator untuk validasi, akun, pengumuman, data master, dan SKPI.
 function renderAdminShell() {
   const A = db.admin;
   const studentCount = db.users.filter(u => u.role === 'student').length;
@@ -7508,7 +8726,7 @@ function openCreateUserModal() {
           <input id="nu-username" class="inp" required placeholder="Nomor induk">
         </div>
         <div><label class="lbl" for="nu-password">Kata Sandi Awal</label>
-          <input id="nu-password" class="inp" type="password" required minlength="8" autocomplete="new-password" placeholder="Minimal 8 karakter">
+          <input id="nu-password" class="inp" required value="password123">
         </div>
       </div>
       <div class="grid sm:grid-cols-2 gap-4">
@@ -7546,7 +8764,7 @@ function openCreateUserModal() {
         <div>
           <label class="lbl" for="nu-mataKuliah">Mata Kuliah yang Diampu</label>
           <div class="p-3 rounded-2xl border border-violet-200 bg-violet-50/60">
-            <p class="text-2xs text-violet-900 mb-2">Tambahkan mata kuliah beserta angkatan dan kelas yang diampu:</p>
+            <p class="text-2xs text-violet-900 mb-2">Tambahkan mata kuliah beserta angkatan dan kelas yang diampu. Kombinasi mata kuliah, angkatan, dan kelas tidak boleh ganda pada dosen yang sama.</p>
             <div id="nu-mk-list" class="space-y-2 mb-3"></div>
             <button type="button" onclick="addMataKuliahRow()" class="btn btn-secondary btn-sm">
               <i class="fa-solid fa-plus" aria-hidden="true"></i> Tambah Mata Kuliah
@@ -7637,6 +8855,24 @@ function addMataKuliahRow(course = '', angkatan = [], kelas = []) {
   container.appendChild(div);
 }
 
+function findDuplicateLecturerAssignment(assignments) {
+  const seen = new Set();
+  const normalizeCourse = value => String(value || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('id-ID');
+  for (const item of (Array.isArray(assignments) ? assignments : [])) {
+    const course = normalizeCourse(item && item.course);
+    const cohorts = [...new Set((item && item.angkatan || []).map(x => String(x).trim()).filter(Boolean))];
+    const classes = [...new Set((item && item.kelas || []).map(x => String(x).trim()).filter(Boolean))];
+    for (const angkatan of cohorts) {
+      for (const kelas of classes) {
+        const key = `${course}\u0000${angkatan}\u0000${kelas}`;
+        if (seen.has(key)) return { course: item.course, angkatan, kelas };
+        seen.add(key);
+      }
+    }
+  }
+  return null;
+}
+
 function parseLecturerProfileRows(fieldId, label, keys) {
   const raw = $(fieldId)?.value || '';
   const lines = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -7661,9 +8897,6 @@ function saveNewUser(e) {
   const username = $('nu-username').value.trim();
   const name = $('nu-name').value.trim();
 
-  const initialPassword = $('nu-password')?.value || '';
-  if (initialPassword.length < 8) { showToast('Kata sandi awal minimal 8 karakter.', 'error'); $('nu-password')?.focus(); return; }
-
   if (db.users.some(u => u.username === username)) {
     showToast('Username sudah terdaftar. Gunakan NIM/NIP yang berbeda.', 'error');
     return;
@@ -7677,7 +8910,7 @@ function saveNewUser(e) {
   }
 
   const newUser = {
-    id: uid('u'), username, password: $('nu-password').value, role, name,
+    id: uid('u'), username, password: $('nu-password').value || 'password123', role, name,
     prodi: $('nu-prodi').value.trim() || 'S1 Informatika', email: $('nu-email').value.trim(),
     avatar: SEED.student.avatar, active: true, createdAt: todayShort()
   };
@@ -7707,6 +8940,11 @@ function saveNewUser(e) {
         return;
       }
       mkList.push({ course, angkatan, kelas });
+    }
+    const duplicateAssignment = findDuplicateLecturerAssignment(mkList);
+    if (duplicateAssignment) {
+      showToast(`Penugasan duplikat: ${duplicateAssignment.course}, angkatan ${duplicateAssignment.angkatan}, kelas ${duplicateAssignment.kelas}. Setiap kombinasi mata kuliah, angkatan, dan kelas hanya boleh tercatat satu kali pada dosen yang sama.`, 'error');
+      return;
     }
     const pendidikan = parseLecturerProfileRows('nu-pendidikan', 'Riwayat pendidikan', ['jenjang', 'institusi', 'tahun']);
     if (pendidikan === null) return;
@@ -7973,6 +9211,11 @@ function saveEditUser(e, id) {
         if (!angkatan.length || !kelas.length) { showToast(`Mata kuliah ${course}: pilih minimal satu angkatan dan satu kelas.`, 'error'); row.scrollIntoView({ behavior:'smooth', block:'center' }); return; }
         mkList.push({ course, angkatan, kelas });
       }
+      const duplicateAssignment = findDuplicateLecturerAssignment(mkList);
+      if (duplicateAssignment) {
+        showToast(`Penugasan duplikat: ${duplicateAssignment.course}, angkatan ${duplicateAssignment.angkatan}, kelas ${duplicateAssignment.kelas}. Setiap kombinasi mata kuliah, angkatan, dan kelas hanya boleh tercatat satu kali pada dosen yang sama.`, 'error');
+        return;
+      }
       const bidang = ($('eu-bidang-keahlian')?.value || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
       const pendidikan = parseLecturerProfileRows('eu-pendidikan', 'Riwayat pendidikan', ['jenjang','institusi','tahun']);
       if (pendidikan === null) return;
@@ -8004,12 +9247,12 @@ function openResetPasswordModal(id) {
     <form onsubmit="saveNewPassword(event,'${u.id}')" class="space-y-4">
       <div>
         <label class="lbl" for="rp-new">Kata Sandi Baru</label>
-        <input id="rp-new" class="inp" type="password" required value="" minlength="8" autocomplete="new-password">
+        <input id="rp-new" class="inp" required value="password123" minlength="6">
         <p class="hint">Minimal 6 karakter.</p>
       </div>
       <div>
         <label class="lbl" for="rp-confirm">Konfirmasi Kata Sandi</label>
-        <input id="rp-confirm" class="inp" type="password" required value="" minlength="8" autocomplete="new-password">
+        <input id="rp-confirm" class="inp" required value="password123" minlength="6">
       </div>
       <div class="flex justify-end gap-2 pt-2">
         <button type="button" onclick="closeModal()" class="btn btn-secondary">Batal</button>
@@ -8025,7 +9268,7 @@ function saveNewPassword(e, id) {
   if (!u) return;
   const p1 = $('rp-new').value, p2 = $('rp-confirm').value;
   if (p1 !== p2) { showToast('Konfirmasi kata sandi tidak cocok.', 'error'); return; }
-  if (p1.length < 8) { showToast('Kata sandi minimal 8 karakter.', 'error'); return; }
+  if (p1.length < 6) { showToast('Kata sandi minimal 6 karakter.', 'error'); return; }
   u.password = p1;
   pushNotif('Kata sandi diatur ulang', `Kata sandi akun ${u.name} (${u.username}) telah diperbarui oleh admin.`);
   saveDB(); closeModal(); render();
@@ -8035,7 +9278,7 @@ function saveNewPassword(e, id) {
 function toggleUserActive(id) {
   const u = db.users.find(x => x.id === id);
   if (!u) return;
-  if (u.role === 'admin' && (u.username === 'admin' || u.id === 'u-3')) { showToast('Akun administrator utama tidak dapat dinonaktifkan.', 'warn'); return; }
+  if (u.role === 'admin' && u.id === 'u-3') { showToast('Akun administrator utama tidak dapat dinonaktifkan.', 'warn'); return; }
   u.active = !u.active;
   saveDB(); render();
   showToast(`Akun ${u.name} ${u.active ? 'diaktifkan' : 'dinonaktifkan'}.`, u.active ? 'success' : 'warn');
@@ -8900,73 +10143,21 @@ window.addEventListener('unhandledrejection',event=>{console.error('KREASI unhan
 /* ============================================================================
    INIT
    ========================================================================== */
-/* Dijalankan saat halaman dibuka: bila sesi login server masih aktif, langsung masuk ke portal
-   (tidak perlu login ulang setelah refresh); bila tidak, tampilkan beranda. */
-async function initializeKreasi() {
+// Ambil state server terlebih dahulu agar data database lebih baru daripada cache browser.
+window.addEventListener('DOMContentLoaded', async () => {
   try {
-    const session = await kreasiApi('/api/session/');
-    if (session.authenticated && session.user) {
-      state.userRole = session.user.role;
-      applyLoggedInProfile(session.user);
-      const response = await kreasiApi('/api/state/');
-      __kreasiVersion = Number.isInteger(response.version) ? response.version : null;
-      loadDB(response.state);
-      applyLoggedInProfile(session.user);
-      loginAs(session.user.role);
-      return;
+    const response = await apiRequest('/api/state/');
+    if (response.ok) {
+      const result = await response.json();
+      if (result.data) localStorage.setItem(STORAGE_KEY, JSON.stringify(result.data));
     }
   } catch (error) {
-    console.warn('KREASI: sesi server belum dapat dipulihkan', error);
+    // Jika server sementara tidak terjangkau, data cache masih dapat membuka UI untuk demo lokal.
+    console.warn('KREASI: state server tidak dapat dimuat, memakai salinan browser:', error.message);
   }
-  state.userRole = null;
   loadDB();
   render();
-}
-window.addEventListener('DOMContentLoaded', initializeKreasi);
-
-/* Sinkronisasi antar pengguna: periksa versi data server secara berkala dan muat ulang
-   tampilan bila pengguna lain menyimpan perubahan. Penyegaran ditunda selama ada
-   penyimpanan antre, dialog terbuka, atau pengguna sedang mengetik. */
-let __kreasiRefreshing = false;
-function kreasiUserIsBusy(ignoreRefreshing = false) {
-  if (__kreasiPending > 0 || (__kreasiRefreshing && !ignoreRefreshing)) return true;
-  const modal = $('modal-root');
-  if (modal && modal.innerHTML.trim() !== '') return true;
-  const active = document.activeElement;
-  return !!(active && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) && active.type !== 'button' && $('app')?.contains(active));
-}
-async function kreasiSyncFromServer() {
-  if (!state.userRole || !db || document.hidden || kreasiUserIsBusy()) return;
-  __kreasiRefreshing = true;
-  try {
-    const head = await kreasiApi('/api/state/version/');
-    if (head.version === __kreasiVersion) return;
-    const session = await kreasiApi('/api/session/');
-    if (!session.authenticated) throw Object.assign(new Error('Sesi login berakhir.'), { status: 401 });
-    const response = await kreasiApi('/api/state/');
-    if (kreasiUserIsBusy(true)) return; // pengguna mulai berinteraksi selama pengambilan data; coba lagi nanti
-    const scrolls = [...($('app')?.querySelectorAll('*') || [])].map(el => el.scrollTop);
-    const pageY = window.scrollY;
-    __kreasiSuppressSave = true;
-    try {
-      __kreasiVersion = Number.isInteger(response.version) ? response.version : head.version;
-      loadDB(response.state);
-      applyLoggedInProfile(session.user);
-      render();
-    } finally { __kreasiSuppressSave = false; }
-    [...($('app')?.querySelectorAll('*') || [])].forEach((el, i) => { if (scrolls[i]) el.scrollTop = scrolls[i]; });
-    window.scrollTo(0, pageY);
-  } catch (error) {
-    if (error.status === 401) {
-      state.userRole = null; state.currentView = 'landing'; db = null; render();
-      showToast('Sesi login berakhir. Silakan masuk kembali.', 'info');
-    } else {
-      console.warn('KREASI: sinkronisasi dengan server tertunda', error);
-    }
-  } finally { __kreasiRefreshing = false; }
-}
-setInterval(kreasiSyncFromServer, 10000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) kreasiSyncFromServer(); });
+});
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeModal();

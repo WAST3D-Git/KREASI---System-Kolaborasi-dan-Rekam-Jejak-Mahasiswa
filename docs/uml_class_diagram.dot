@@ -1,0 +1,135 @@
+digraph KREASI_UML {
+  graph [rankdir=TB, bgcolor="white", pad="0.28", nodesep="0.42", ranksep="0.62", fontname="Arial", label="UML Class Diagram - KREASI Django", labelloc="t", fontsize=22, compound=true];
+  node [shape=plain, fontname="Arial", fontsize=10];
+  edge [fontname="Arial", fontsize=9, color="#475569", arrowsize=0.8];
+
+  ABC [label=<
+    <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#64748B">
+      <TR><TD BGCOLOR="#E2E8F0"><B><I>ABC</I></B></TD></TR>
+      <TR><TD ALIGN="LEFT">Python: abc.ABC</TD></TR>
+    </TABLE>>];
+
+  subgraph cluster_accounts {
+    label="Layanan Akun (Abstraksi, Inheritance, Polimorfisme)";
+    color="#C4B5FD"; style="rounded"; fontname="Arial"; fontsize=13;
+
+    BaseAccountService [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#0F766E">
+        <TR><TD BGCOLOR="#CCFBF1"><B><I>BaseAccountService</I></B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ role: str | None</TD></TR>
+        <TR><TD ALIGN="LEFT">+ _base_fields(record)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ sync_record(record)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ build_profile(record): abstract</TD></TR>
+        <TR><TD ALIGN="LEFT">+ serialize_login_profile(user): abstract</TD></TR>
+      </TABLE>>];
+
+    StudentAccountService [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#7C3AED">
+        <TR><TD BGCOLOR="#EDE9FE"><B>StudentAccountService</B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ role = student</TD></TR>
+        <TR><TD ALIGN="LEFT">+ build_profile(record)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ serialize_login_profile(user)</TD></TR>
+      </TABLE>>];
+    LecturerAccountService [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#7C3AED">
+        <TR><TD BGCOLOR="#EDE9FE"><B>LecturerAccountService</B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ role = lecturer</TD></TR>
+        <TR><TD ALIGN="LEFT">+ build_profile(record)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ serialize_login_profile(user)</TD></TR>
+      </TABLE>>];
+    AdminAccountService [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#7C3AED">
+        <TR><TD BGCOLOR="#EDE9FE"><B>AdminAccountService</B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ role = admin</TD></TR>
+        <TR><TD ALIGN="LEFT">+ build_profile(record)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ serialize_login_profile(user)</TD></TR>
+      </TABLE>>];
+    AccountServiceFactory [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#1D4ED8">
+        <TR><TD BGCOLOR="#DBEAFE"><B>AccountServiceFactory</B></TD></TR>
+        <TR><TD ALIGN="LEFT">- _services: dict</TD></TR>
+        <TR><TD ALIGN="LEFT">+ for_role(role)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ normalize(record)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ serialize(user)</TD></TR>
+      </TABLE>>];
+    {rank=same; StudentAccountService; LecturerAccountService; AdminAccountService;}
+  }
+
+  subgraph cluster_data {
+    label="Layanan Data dan Model";
+    color="#93C5FD"; style="rounded"; fontname="Arial"; fontsize=13;
+    BaseStateRepository [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#0F766E">
+        <TR><TD BGCOLOR="#CCFBF1"><B><I>BaseStateRepository</I></B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ load(key): abstract</TD></TR>
+        <TR><TD ALIGN="LEFT">+ save(data, key): abstract</TD></TR>
+      </TABLE>>];
+    DjangoStateRepository [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#0F766E">
+        <TR><TD BGCOLOR="#CCFBF1"><B>DjangoStateRepository</B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ load(key)</TD></TR><TR><TD ALIGN="LEFT">+ save(data, key)</TD></TR>
+      </TABLE>>];
+    PermissionService [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#B45309">
+        <TR><TD BGCOLOR="#FEF3C7"><B>PermissionService</B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ role_can_write(role)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ role_can_manage_documents(role)</TD></TR>
+      </TABLE>>];
+    StateService [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#1D4ED8">
+        <TR><TD BGCOLOR="#DBEAFE"><B>StateService</B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ state_key: str</TD></TR>
+        <TR><TD ALIGN="LEFT">+ repository</TD></TR><TR><TD ALIGN="LEFT">+ permissions</TD></TR>
+        <TR><TD ALIGN="LEFT">+ load_state()</TD></TR><TR><TD ALIGN="LEFT">+ store_state(data, actor_role)</TD></TR>
+      </TABLE>>];
+    DocumentService [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#1D4ED8">
+        <TR><TD BGCOLOR="#DBEAFE"><B>DocumentService</B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ max_file_size: int</TD></TR>
+        <TR><TD ALIGN="LEFT">+ permissions</TD></TR>
+        <TR><TD ALIGN="LEFT">+ create(file, metadata, role)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ get(document_id, role)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ delete(document_id, role)</TD></TR>
+      </TABLE>>];
+    TimestampedModel [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#64748B">
+        <TR><TD BGCOLOR="#E2E8F0"><B><I>TimestampedModel</I></B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ created_at: DateTime</TD></TR><TR><TD ALIGN="LEFT">+ updated_at: DateTime</TD></TR>
+      </TABLE>>];
+    ApplicationState [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#7C3AED">
+        <TR><TD BGCOLOR="#F5F3FF"><B>ApplicationState</B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ key: str</TD></TR><TR><TD ALIGN="LEFT">+ payload: JSON</TD></TR>
+        <TR><TD ALIGN="LEFT">+ read_payload()</TD></TR><TR><TD ALIGN="LEFT">+ replace_payload(data)</TD></TR>
+      </TABLE>>];
+    StoredDocument [label=<
+      <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#7C3AED">
+        <TR><TD BGCOLOR="#F5F3FF"><B>StoredDocument</B></TD></TR>
+        <TR><TD ALIGN="LEFT">+ id: str</TD></TR><TR><TD ALIGN="LEFT">+ file: File</TD></TR>
+        <TR><TD ALIGN="LEFT">+ original_name: str</TD></TR><TR><TD ALIGN="LEFT">+ content_type: str</TD></TR>
+        <TR><TD ALIGN="LEFT">+ size: int</TD></TR><TR><TD ALIGN="LEFT">+ metadata: JSON</TD></TR>
+      </TABLE>>];
+  }
+
+  # ABC adalah induk dari kontrak abstrak BaseAccountService dan BaseStateRepository.
+  BaseAccountService -> ABC [arrowhead=empty, label="mewarisi ABC"];
+  BaseStateRepository -> ABC [arrowhead=empty, label="mewarisi ABC"];
+
+  # Pewarisan kelas akun: satu induk dengan tiga implementasi berbeda.
+  StudentAccountService -> BaseAccountService [arrowhead=empty, label="single + hierarchical"];
+  LecturerAccountService -> BaseAccountService [arrowhead=empty, label="single + hierarchical"];
+  AdminAccountService -> BaseAccountService [arrowhead=empty, label="single + hierarchical"];
+  AccountServiceFactory -> BaseAccountService [style=dashed, arrowhead=vee, label="memilih layanan"];
+  AccountServiceFactory -> StudentAccountService [style=dashed, arrowhead=vee];
+  AccountServiceFactory -> LecturerAccountService [style=dashed, arrowhead=vee];
+  AccountServiceFactory -> AdminAccountService [style=dashed, arrowhead=vee];
+
+  DjangoStateRepository -> BaseStateRepository [arrowhead=empty, label="single inheritance"];
+  StateService -> DjangoStateRepository [style=dashed, arrowhead=vee, label="composition"];
+  StateService -> PermissionService [style=dashed, arrowhead=vee, label="composition"];
+  DocumentService -> PermissionService [style=dashed, arrowhead=vee, label="composition"];
+  StateService -> ApplicationState [style=dashed, arrowhead=vee, label="reads/writes"];
+  DocumentService -> StoredDocument [style=dashed, arrowhead=vee, label="creates/reads/deletes"];
+  ApplicationState -> TimestampedModel [arrowhead=empty, label="inheritance"];
+  StoredDocument -> TimestampedModel [arrowhead=empty, label="inheritance"];
+}
