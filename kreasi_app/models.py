@@ -15,21 +15,52 @@ class TimestampedModel(models.Model):
         abstract = True
 
 class ApplicationState(TimestampedModel):
-    """Menyimpan seluruh data kerja antarmuka KREASI dalam satu record JSON.
+    """Menyimpan data kerja KREASI dalam satu record JSON dengan getter/setter.
 
-    Struktur JSON mengikuti objek data JavaScript versi HTML asal sehingga bentuk UI,
-    data dummy, dan interaksi lama tetap dapat digunakan tanpa migrasi isi satu per satu.
+    Data utama tetap berada pada kolom database bernama ``payload``. Di dalam
+    Python, field disimpan sebagai ``_payload_data`` dan diakses melalui property
+    ``payload`` serta method get_payload()/set_payload() agar pembacaan dan perubahan
+    dapat diarahkan melalui satu tempat yang jelas.
     """
     key = models.CharField(max_length=80, unique=True, default="kreasi-default")
-    payload = models.JSONField(default=dict, help_text="Data proyek, akun demo, prestasi, dan pengaturan.")
+    # Garis bawah menandai field internal; db_column menjaga nama kolom database tetap "payload".
+    _payload_data = models.JSONField(
+        db_column="payload",
+        default=dict,
+        help_text="Data proyek, akun demo, prestasi, dan pengaturan.",
+    )
+
+    @property
+    def payload(self):
+        """Getter: memberi salinan payload supaya pemanggil tidak mengubah data internal langsung."""
+        return self.get_payload()
+
+    @payload.setter
+    def payload(self, data):
+        """Setter: memvalidasi dan menyalin payload saat atribut payload diisi."""
+        self.set_payload(data)
+
+    def get_payload(self):
+        """Mengambil salinan data KREASI melalui getter yang disediakan model."""
+        return deepcopy(getattr(self, "_payload_data", None) or {})
+
+    def set_payload(self, data):
+        """Mengubah payload melalui setter setelah memastikan bentuk datanya dictionary.
+
+        Penyalinan data mencegah list atau dictionary dari pemanggil mengubah state
+        model secara tidak sengaja setelah setter selesai dipanggil.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("Data payload harus berupa dictionary/objek JSON.")
+        self._payload_data = deepcopy(data)
 
     def read_payload(self):
-        """Mengembalikan salinan data agar pemanggil tidak mengubah isi model secara tidak sengaja."""
-        return deepcopy(self.payload or {})
+        """Nama lama yang dipertahankan agar pemanggil sebelumnya tetap kompatibel."""
+        return self.get_payload()
 
     def replace_payload(self, data):
-        """Mengganti isi data melalui satu method sehingga validasi dilakukan oleh service."""
-        self.payload = deepcopy(data)
+        """Nama lama untuk proses tulis; perubahan tetap melewati setter yang sama."""
+        self.set_payload(data)
 
     def __str__(self):
         """Menampilkan label yang mudah dikenali pada halaman admin Django."""

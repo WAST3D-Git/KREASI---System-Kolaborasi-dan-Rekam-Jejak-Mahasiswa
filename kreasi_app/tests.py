@@ -71,6 +71,44 @@ class AccountServiceTests(TestCase):
             AccountServiceFactory.for_role("visitor")
 
 
+class ApplicationStateGetterSetterTests(TestCase):
+    """Memastikan getter/setter menjaga payload sebagai data yang dikelola model."""
+
+    def test_getter_returns_a_copy(self):
+        """Perubahan pada salinan hasil getter tidak boleh mengubah payload di model."""
+        state = ApplicationState.objects.create(
+            key="getter-copy-test",
+            payload={"projects": [{"id": "PRJ-001"}]},
+        )
+        # Pastikan getter juga bekerja setelah data dibaca lagi dari database.
+        state.refresh_from_db()
+        copied_payload = state.get_payload()
+        copied_payload["projects"][0]["id"] = "CHANGED"
+
+        self.assertEqual(state.get_payload()["projects"][0]["id"], "PRJ-001")
+
+    def test_setter_copies_input_and_property_uses_getter_setter(self):
+        """Setter dan property payload harus menyalin data input sebelum disimpan."""
+        state = ApplicationState(key="getter-setter-test")
+        original = {"courses": ["Basis Data"]}
+        state.set_payload(original)
+        original["courses"].append("Data yang diubah dari luar")
+        state.save()
+        state.refresh_from_db()
+
+        self.assertEqual(state.payload, {"courses": ["Basis Data"]})
+        state.payload = {"courses": ["Rekayasa Perangkat Lunak"]}
+        state.save()
+        state.refresh_from_db()
+        self.assertEqual(state.get_payload(), {"courses": ["Rekayasa Perangkat Lunak"]})
+
+    def test_setter_rejects_non_dictionary_payload(self):
+        """Setter menolak tipe data yang bukan objek JSON yang digunakan sebagai state."""
+        state = ApplicationState(key="getter-setter-invalid-test")
+        with self.assertRaises(ValueError):
+            state.set_payload(["bukan", "dictionary"])
+
+
 class StateServiceTests(TestCase):
     """Memastikan state tersimpan, terisolasi, dan akses tanpa login ditolak setelah bootstrap."""
 

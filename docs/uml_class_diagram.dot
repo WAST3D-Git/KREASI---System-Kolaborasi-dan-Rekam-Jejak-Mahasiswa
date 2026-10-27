@@ -99,8 +99,10 @@ digraph KREASI_UML {
     ApplicationState [label=<
       <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#7C3AED">
         <TR><TD BGCOLOR="#F5F3FF"><B>ApplicationState</B></TD></TR>
-        <TR><TD ALIGN="LEFT">+ key: str</TD></TR><TR><TD ALIGN="LEFT">+ payload: JSON</TD></TR>
-        <TR><TD ALIGN="LEFT">+ read_payload()</TD></TR><TR><TD ALIGN="LEFT">+ replace_payload(data)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ key: str</TD></TR><TR><TD ALIGN="LEFT">~ _payload_data: JSON (internal by convention)</TD></TR>
+        <TR><TD ALIGN="LEFT">+ payload: property</TD></TR>
+        <TR><TD ALIGN="LEFT">+ get_payload() : getter</TD></TR><TR><TD ALIGN="LEFT">+ set_payload(data) : setter</TD></TR>
+        <TR><TD ALIGN="LEFT">+ read_payload() : compatibility</TD></TR><TR><TD ALIGN="LEFT">+ replace_payload(data) : compatibility</TD></TR>
       </TABLE>>];
     StoredDocument [label=<
       <TABLE BORDER="1" CELLBORDER="0" CELLSPACING="0" CELLPADDING="6" COLOR="#7C3AED">

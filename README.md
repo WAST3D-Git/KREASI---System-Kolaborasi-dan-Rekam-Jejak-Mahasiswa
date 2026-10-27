@@ -126,7 +126,7 @@ OOP (*Object-Oriented Programming* atau pemrograman berorientasi objek) adalah c
 
 ## 1. Enkapsulasi (*encapsulation*)
 
-**Di mana:** `kreasi_app/services.py`, class `StateService` dan `PermissionService`; serta `kreasi_app/models.py`, class `ApplicationState` melalui method `read_payload()` dan `replace_payload()`.
+**Di mana:** `kreasi_app/models.py`, class `ApplicationState`, melalui getter `get_payload()` dan setter `set_payload()` serta property `payload`; dan `kreasi_app/services.py`, class `DjangoStateRepository` serta `StateService` yang memakai jalur getter/setter tersebut.
 
 ### Apa artinya?
 
@@ -136,30 +136,53 @@ Enkapsulasi berarti mengelompokkan data dan proses yang berhubungan ke dalam cla
 
 `StateService` menjadi pintu layanan untuk membaca dan menyimpan data aplikasi. View pada `views.py` memanggil `load_state()` atau `store_state()`, bukan menulis langsung ke record database dari setiap endpoint. Sebelum data disimpan, `store_state()` memeriksa apakah data berbentuk dictionary, memeriksa ukuran payload, dan memeriksa peran sesi setelah data awal dibuat. Setelah lolos pemeriksaan, data diteruskan ke repository untuk disimpan.
 
-Di sisi model, `ApplicationState.read_payload()` mengembalikan **salinan** data, sedangkan `replace_payload()` mengganti isi data dengan salinan baru. Cara ini mengurangi risiko bagian lain mengubah object data yang sedang disimpan secara tidak sengaja melalui referensi yang sama.
+Di sisi model, `ApplicationState.get_payload()` adalah getter yang memberikan salinan isi data. `ApplicationState.set_payload(data)` adalah setter yang menerima perubahan, memastikan data berbentuk dictionary, lalu menyimpan salinannya. Property `payload` juga diarahkan ke getter/setter tersebut, sehingga kode aplikasi yang membaca atau mengisi `state.payload` melewati aturan yang sama. Method lama `read_payload()` dan `replace_payload()` tetap tersedia sebagai penghubung agar pemanggil terdahulu tetap kompatibel.
 
 ```python
-# Contoh dari kreasi_app/models.py
-from copy import deepcopy
-
+# Contoh ringkas dari kreasi_app/models.py
 class ApplicationState(TimestampedModel):
-    # Field payload menyimpan data KREASI yang berbentuk JSON.
-    payload = models.JSONField(default=dict)
+    # Field database internal memakai kolom database bernama "payload".
+    _payload_data = models.JSONField(db_column="payload", default=dict)
 
-    def read_payload(self):
-        # Memberikan salinan agar pemanggil tidak mengubah data asli lewat referensi yang sama.
-        return deepcopy(self.payload or {})
+    @property
+    def payload(self):
+        # Getter menyediakan salinan agar perubahan di luar class tidak langsung mengubah data internal.
+        return self.get_payload()
 
-    def replace_payload(self, data):
-        # Menyediakan satu cara yang jelas untuk mengganti seluruh payload.
-        self.payload = deepcopy(data)
+    @payload.setter
+    def payload(self, data):
+        # Setter mengarahkan setiap penetapan property ke proses validasi yang sama.
+        self.set_payload(data)
+
+    def get_payload(self):
+        # Getter mengembalikan salinan isi data.
+        return deepcopy(getattr(self, "_payload_data", None) or {})
+
+    def set_payload(self, data):
+        # Setter memastikan data cocok untuk state aplikasi dan memisahkan salinannya.
+        if not isinstance(data, dict):
+            raise ValueError("Data payload harus berupa dictionary/objek JSON.")
+        self._payload_data = deepcopy(data)
 ```
+
+**Contoh alur pemakaian:** repository memanggil `get_payload()` untuk membaca data dan `set_payload(data)` untuk menggantinya. Setelah setter dipanggil, repository menyimpan record dengan `save()`. Dengan begitu, perubahan data proyek, prestasi, dashboard, dan data master menggunakan jalur yang konsisten.
+
+```python
+# Contoh pemakaian dari kode backend
+state = ApplicationState.objects.get(key="kreasi-default")
+data = state.get_payload()           # Getter: ambil salinan untuk dibaca/diolah.
+data["masterData"]["courses"] = ["Basis Data"]
+state.set_payload(data)              # Setter: validasi tipe dan simpan salinan baru.
+state.save()                         # Simpan perubahan ke database.
+```
+
+Jika setter menerima data yang bukan dictionary, method akan mengangkat `ValueError` sehingga bentuk data yang disimpan tetap sesuai dengan state KREASI. Getter juga mengembalikan salinan, jadi perubahan pada hasil getter tidak otomatis mengubah data di dalam model sebelum setter dipanggil.
 
 **Hubungannya dengan fitur:** saat dashboard, proyek, prestasi, atau data master perlu disimpan, aplikasi menggunakan layanan state yang sama. Pemeriksaan dan proses penyimpanan terpusat sehingga tidak perlu ditulis ulang pada setiap fitur.
 
 Pada layanan akun, method `_base_fields()` juga merapikan informasi umum akun dan tidak memasukkan field `password` ke profil. Nama yang diawali satu garis bawah, seperti `_base_fields()`, merupakan konvensi Python untuk menandai bagian yang dimaksudkan sebagai helper internal. Ini bukan kunci keamanan mutlak. Kontrol akses tetap perlu dilakukan melalui pemeriksaan service dan endpoint.
 
-**Batasan yang perlu dipahami:** Python tidak secara otomatis melarang semua kode luar memanggil atribut atau method publik suatu object. Jadi, enkapsulasi dalam KREASI terutama diterapkan melalui pemusatan proses, method yang terdefinisi, salinan data, validasi, dan pemeriksaan peran—bukan dengan menganggap semua atribut sudah privat.
+**Batasan yang perlu dipahami:** getter/setter membuat jalur akses resmi dan menerapkan validasi, tetapi bukan mekanisme keamanan mutlak. Python masih memungkinkan kode yang sengaja mengakses atribut internal `_payload_data`; garis bawah adalah konvensi untuk menandai bagian internal. Perlindungan pada fitur juga tetap mengandalkan validasi `StateService` dan pemeriksaan peran sebelum data disimpan.
 
 ## 2. Abstraksi (*abstraction*)
 

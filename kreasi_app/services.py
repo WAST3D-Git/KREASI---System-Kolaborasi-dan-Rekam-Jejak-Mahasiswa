@@ -214,13 +214,13 @@ class DjangoStateRepository(BaseStateRepository):
     def load(self, key="kreasi-default"):
         """Mengambil salinan payload agar pemanggil tidak mengubah model tanpa sengaja."""
         record = ApplicationState.objects.filter(key=key).first()
-        return record.read_payload() if record else None
+        return record.get_payload() if record else None
 
     @transaction.atomic
     def save(self, data, key="kreasi-default"):
         """Menyimpan payload dalam transaksi agar perubahan tetap utuh."""
         record, _created = ApplicationState.objects.select_for_update().get_or_create(key=key)
-        record.replace_payload(data)
+        record.set_payload(data)
         record.save()
         return record
 
