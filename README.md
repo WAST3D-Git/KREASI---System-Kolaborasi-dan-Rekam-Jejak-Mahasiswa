@@ -20,6 +20,14 @@ Aplikasi menggunakan Django sebagai backend dan SQLite sebagai database awal. Da
 
 Untuk menjaga kompatibilitas dengan data demo, data bisnis aplikasi saat ini disimpan sebagai satu payload JSON, bukan dipisah menjadi tabel relasional untuk setiap akun, proyek, anggota, dan prestasi. Pendekatan ini membantu mempertahankan struktur data pada versi demo, tetapi belum ditujukan sebagai rancangan akhir untuk penggunaan produksi berskala besar.
 
+Frontend — HTML, CSS, JavaScript
+Menampilkan halaman, tombol, formulir, menu navigasi, filter proyek, modal, notifikasi, dan perubahan tampilan tanpa harus memuat ulang seluruh halaman.
+Permintaan dan respons melalui API
+
+Backend — Python dan Django
+Memproses permintaan, melakukan autentikasi, memeriksa hak akses, memvalidasi data, menjalankan aturan bisnis, dan mengelola penyimpanan.
+Baca dan simpan data
+
 Rincian fitur per peran dijelaskan dalam [FEATURE.md](FEATURE.md).
 
 ## Menjalankan aplikasi
