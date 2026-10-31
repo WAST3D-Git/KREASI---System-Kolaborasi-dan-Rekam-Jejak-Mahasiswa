@@ -176,3 +176,11 @@ class HomePageTests(TestCase):
         response = self.client.get("/api/state/")
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.json()["data"])
+
+    def test_lecturer_non_group_member_removal_handler_is_present(self):
+        """Tombol daftar tim harus memiliki handler konfirmasi yang dapat dipanggil."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "function confirmRemoveMember(projectId, nim)")
+        self.assertContains(response, "confirmRemoveMember('${p.id}','${m.nim}')")
+        self.assertContains(response, "removeMemberFromProject('${esc(p.id)}','','${esc(member.nim)}')")

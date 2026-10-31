@@ -4470,6 +4470,7 @@ function setProjectFilter(f) { state.projectFilter = f; render(); }
 
 function teamHtml(p) {
   const lec = state.userRole === 'lecturer';
+  const canRemoveMembers = lec && canApproveProject(p, 'lecturer', SEED.lecturer);
   const members = allMembersOf(p);
   const total = isGroupProject(p) ? members.length : p.members.length;
   return `<div><p class="text-2xs font-bold text-slate-500 uppercase mb-2">Susunan Tim (${projectMemberCountLabel(p)})</p>
@@ -4483,7 +4484,7 @@ function teamHtml(p) {
           </p>
           <p class="text-2xs text-slate-500 truncate">${esc(m.prodi || '')} · ${esc(m.role || 'Anggota')}</p>
         </div>
-        ${lec && !isGroupProject(p) && !pending ? `<button onclick="confirmRemoveMember('${p.id}','${m.nim}')" class="text-2xs font-bold text-rose-600 hover:underline shrink-0"><i class="fa-solid fa-user-minus mr-1" aria-hidden="true"></i>Keluarkan</button>` : ''}
+        ${canRemoveMembers && !isGroupProject(p) && !pending ? `<button onclick="confirmRemoveMember('${p.id}','${m.nim}')" class="text-2xs font-bold text-rose-600 hover:underline shrink-0"><i class="fa-solid fa-user-minus mr-1" aria-hidden="true"></i>Keluarkan</button>` : ''}
       </div>`;
     }).join('')}</div>` : '<p class="text-2xs text-slate-400">Belum ada anggota.</p>'}</div>`;
 }
@@ -7661,18 +7662,70 @@ function filterAddMemberList(inputEl) {
   });
 }
 
+function confirmRemoveMember(projectId, nim) {
+  const p = getProject(projectId);
+  if (!p) {
+    showToast('Proyek tidak ditemukan.', 'error');
+    return;
+  }
+  if (state.userRole !== 'lecturer' || !canApproveProject(p, 'lecturer', SEED.lecturer)) {
+    showToast('Anda tidak berwenang mengelola anggota proyek ini.', 'error');
+    return;
+  }
+  if (isGroupProject(p)) {
+    showToast('Gunakan menu Kelola Anggota pada kelompok untuk mengeluarkan mahasiswa.', 'info');
+    return;
+  }
+  const member = (p.members || []).find(item => String(item.nim) === String(nim));
+  if (!member) {
+    showToast('Mahasiswa tidak ditemukan sebagai anggota proyek.', 'error');
+    return;
+  }
+  confirmActionModal(
+    'Keluarkan Mahasiswa dari Proyek?',
+    `<strong>${esc(member.name || member.nim)}</strong> (${esc(member.nim)}) akan dikeluarkan dari proyek <strong>${esc(p.title)}</strong>. Mahasiswa dapat diajukan kembali sebagai anggota setelahnya.`,
+    `<button onclick="removeMemberFromProject('${esc(p.id)}','','${esc(member.nim)}')" class="btn btn-danger"><i class="fa-solid fa-user-minus" aria-hidden="true"></i> Ya, Keluarkan</button>`
+  );
+}
+
 function removeMemberFromProject(projectId, groupId, nim) {
   const p = getProject(projectId);
-  if (!p) return;
-  if (groupId) {
-    const g = getGroup(p, groupId);
-    if (g) g.members = g.members.filter(x => x.nim !== nim);
-  } else {
-    p.members = p.members.filter(x => x.nim !== nim);
+  if (!p) {
+    showToast('Proyek tidak ditemukan.', 'error');
+    return;
   }
-  if (projectMemberLimit(p) > 0 && !isProjectAtCapacity(p) && p.status === 'Open') p.registrationClosed = false;
-  saveDB(); closeModal(); render();
-  showToast('Anggota dikeluarkan dari proyek.', 'info');
+  if (state.userRole !== 'lecturer' || !canApproveProject(p, 'lecturer', SEED.lecturer)) {
+    showToast('Anda tidak berwenang mengelola anggota proyek ini.', 'error');
+    return;
+  }
+
+  // Proyek tunggal menyimpan peserta di p.members; proyek berkelompok menyimpannya
+  // di members milik kelompok. Jangan menganggap proyek tanpa groupId sebagai p.members
+  // apabila proyek tersebut sebenarnya memiliki struktur kelompok.
+  const target = groupId ? getGroup(p, groupId) : (!isGroupProject(p) ? p : null);
+  if (!target || !Array.isArray(target.members)) {
+    showToast('Daftar anggota proyek atau kelompok tidak ditemukan.', 'error');
+    return;
+  }
+  const memberIndex = target.members.findIndex(item => String(item.nim) === String(nim));
+  if (memberIndex < 0) {
+    showToast('Mahasiswa tidak ditemukan sebagai anggota proyek.', 'error');
+    return;
+  }
+
+  const previousRegistrationClosed = p.registrationClosed;
+  const [removedMember] = target.members.splice(memberIndex, 1);
+  if (projectMemberLimit(p) > 0 && !isProjectAtCapacity(p) && p.status === 'Open') {
+    p.registrationClosed = false;
+  }
+  if (!saveDB()) {
+    target.members.splice(memberIndex, 0, removedMember);
+    p.registrationClosed = previousRegistrationClosed;
+    return;
+  }
+  closeModal();
+  render();
+  showToast('Anggota berhasil dikeluarkan dari proyek.', 'success');
 }
 
 function approveMemberProposal(projectId, groupId, nim) {
